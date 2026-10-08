@@ -24,6 +24,9 @@ description: Orchestration substrate for Claude Code (the orc plugin). Use when 
    paths), roles, execution policy and target, and `options[]` giving, for maxAgents, maxDurationMinutes, allowedEffects and
    allowedPaths, the chosen default, the alternatives and why. A format criterion must pin the exact shape. Present the plan
    and the rules; call `mcp__orc__request_permission`. That approval launches the mission by itself.
+   List in `executionPolicy.capabilities` every tool or access beyond files and the shell the work or its checks will use
+   (a browser, a local server, a site, another app, credentials), with why and who; the owner approves them at gate 2.
+   Right after approval, before dispatching, use each once so any permission prompt comes while the owner is present.
 5. "Correct" comes with a note (owner_context shows it): change only that, keep the old item as a "correction" evidence
    item, request that gate again. After gate 2, a material change needs a new version (both gates again).
 

@@ -550,7 +550,7 @@ PHASE A — INTERVIEW (before gate 1)
 5. Draft the gate-1 part with mcp__orc__draft_understanding: mission (statement, deliverables), finalPicture (summary, criteria, constraints, exclusions), sourceEvidence, openQuestions (must be empty to request; unresolved ones block). Fix findings, draft again, then present it in plain words — the owner's request next to your interpretation, what you proposed vs what they said — and call mcp__orc__request_understanding. GATE 1 asks the owner: "is this what you mean?"
 
 PHASE B — PLAN AND RULES (after gate 1, before gate 2)
-6. Now draft the plan: plan.nodes (objective, runnable acceptanceChecks, dependsOn, criterionIds, resourceKeys = repo-relative paths the node may change) covering every criterion, acyclic; team.roles (producer and reviewer); executionPolicy (model, maxAgents 1–10, maxAttemptsPerNode, maxDurationMinutes, allowedEffects from local_read local_write network publication messaging spend client_data, materialChangeRule); executionTarget (git_repository: repositoryPath, allowedPaths, requiredCheckIds).
+6. Now draft the plan: plan.nodes (objective, runnable acceptanceChecks, dependsOn, criterionIds, resourceKeys = repo-relative paths the node may change) covering every criterion, acyclic; team.roles (producer and reviewer); executionPolicy (model, maxAgents 1–10, maxAttemptsPerNode, maxDurationMinutes, allowedEffects from local_read local_write network publication messaging spend client_data, materialChangeRule, capabilities); capabilities lists every tool or access beyond files and the shell that the work or its checks will use (a browser, a local server, a site, another app, credentials, a device) as {need, why, by: orchestrator|builder|verifier|integrator, permission: what the owner may be asked, if anything}, and is an empty list when there is none. The owner approves them at gate 2; right after approval you use each once so any permission prompt comes while they are present. For page checks, serve the page locally (http://localhost) rather than file:// or an outside site; executionTarget (git_repository: repositoryPath, allowedPaths, requiredCheckIds).
 7. RULES ARE RECOMMENDED, NOT IMPOSED: for maxAgents, maxDurationMinutes, allowedEffects, allowedPaths, executionPolicy.mode (normal: you dispatch and accept each child; auto: the approved plan runs as a Workbench graph by rule and you are pinged only on failures, gates and the end, which costs the orchestrator about half the tokens but runs slower; good for long or unattended work) and any constraint you added, record in options[] the chosen default, the alternatives you considered and why. options[] is a top-level array of the package (beside executionPolicy, not inside it), one entry per rule: {"field": "maxAgents", "chosen": "2", "alternatives": ["1 serial", "3 parallel"], "why": "two nodes are independent and the machine is loaded"}. The owner sees these at gate 2 and can correct any of them.
 8. Draft again (the full package), fix findings, present the plan and the rules in plain words, then call mcp__orc__request_permission. GATE 2 asks the owner: "approve this plan and these rules?" Only that approval starts work; the substrate generates the mission file from the package and the session (or a subagent, mode=subagent) orchestrates it.
 
@@ -642,6 +642,15 @@ function validateUnderstanding(u: OrcUnderstanding, stage: 1 | 2 = 2): string[] 
     if (!arr(p.allowedEffects) || p.allowedEffects.length === 0) f.push('executionPolicy.allowedEffects needs at least local_read')
     else for (const e of p.allowedEffects) if (!effects.includes(e)) f.push(`unknown effect ${e}`)
     if (!str(p.materialChangeRule)) f.push('executionPolicy.materialChangeRule is required (what counts as a material change)')
+    if (!arr(p.capabilities)) f.push('executionPolicy.capabilities is required: every tool or access beyond files and the shell the work or its checks will use ({need, why, by, permission}); an empty list when there is none')
+    else {
+      for (const c of p.capabilities) if (!c || !str(c.need) || !str(c.why) || !str(c.by)) f.push('executionPolicy.capabilities entries need need, why and by')
+      // A check that plainly needs a browser, a server, a site or an install, with no capability listed, would stop a
+      // run mid-way for a permission (Desktop run 2026-10-08: a phone-width check opened a site and waited for the owner).
+      const checks = [...u.finalPicture.criteria.map(c => c.description), ...(u.plan?.nodes ?? []).flatMap(n => n.acceptanceChecks ?? [])].join('\n')
+      const hint = /\b(browser|viewport|screenshot|phone[- ]width|\d{3}\s?px\b|playwright|selenium|headless|chrom(e|ium)|safari|firefox|localhost:\d+|https?:\/\/(?!localhost|127\.0\.0\.1)|pip3? install|npm (install|i)\b|curl\s|wget\s)/i.exec(checks)
+      if (hint && p.capabilities.length === 0) f.push(`a criterion or check uses "${hint[0]}" but executionPolicy.capabilities is empty: list what it needs (e.g. {need: "built-in browser on http://localhost:<port>", why: "phone-width check", by: "verifier"}) so the owner approves it now, not mid-run`)
+    }
   }
   const t = u.executionTarget
   if (!t) f.push('executionTarget is required (kind git_repository, repositoryPath, allowedPaths)')
@@ -677,6 +686,7 @@ function renderUnderstanding(m: OrcMission): string {
   if (u.team?.roles?.length) L.push('', '## Team', ...u.team.roles.map(r => `- ${r.id} (${r.kind}): ${r.responsibility} → ${(r.nodeIds ?? []).join(', ')}`))
   const p = u.executionPolicy
   if (p) L.push('', '## Execution policy', `model ${p.model} · max agents ${p.maxAgents} · attempts/node ${p.maxAttemptsPerNode} · max ${p.maxDurationMinutes} min · effects ${(p.allowedEffects ?? []).join(', ')}`, `material change: ${p.materialChangeRule}`)
+  if (p?.capabilities?.length) L.push('', '## Tools and access this work will use (approved at gate 2, tried once at the start)', ...p.capabilities.map(c => `- ${c.need} · ${c.why} · used by ${c.by}${c.permission ? ` · may ask: ${c.permission}` : ''}`))
   if (u.options?.length) L.push('', '## Rules recommended (default · alternatives · why)', ...u.options.map(o => `- ${o.field}: ${o.chosen} · alternatives: ${o.alternatives.join(', ')} · ${o.why}`))
   if (u.executionTarget) L.push('', '## Execution target', `${u.executionTarget.repositoryPath}${u.executionTarget.baseCommit ? ` @ ${u.executionTarget.baseCommit.slice(0, 12)}` : ''}`, `allowed paths: ${u.executionTarget.allowedPaths.join(' ') || '(whole repository)'}`, `required checks: ${(u.executionTarget.requiredCheckIds ?? []).join(', ') || '(none)'}`)
   L.push('', '## Source evidence', `original request: ${u.sourceEvidence?.originalRequest ?? ''}`, '')
@@ -744,7 +754,7 @@ async function ownerContext($: EngineInterface, repo: string): Promise<string> {
     m && m.repo === repo
       ? `MISSION STATE: v${m.version} · ${m.status} · drafted ${m.understanding ? 'yes' : 'no'} · findings ${m.findings.length ? m.findings.join(' | ') : 'none'}${last ? ` · last owner decision: ${last.gate} ${last.choice}${last.note ? ` — "${last.note}"` : ''}` : ''}${m.understanding ? `\nORIGINAL REQUEST: ${m.understanding.sourceEvidence.originalRequest}` : ''}`
       : 'MISSION STATE: none for this repository (use /orc begin <request> or draft directly with repo set).',
-    '', 'PACKAGE SHAPE (JSON for mcp__orc__draft_understanding.understanding): { mission: { statement, deliverables[] }, finalPicture: { summary, criteria: [{ id?, description }], constraints[], exclusions[] }, plan: { nodes: [{ id?, objective, acceptanceChecks[], dependsOn[], criterionIds[], resourceKeys?[], testPaths?[], fixesChecks?[] }], testDirs?[] }, team: { roles: [{ id?, kind: producer|reviewer, responsibility, nodeIds[] }] }, executionPolicy: { model, maxAgents, maxAttemptsPerNode, maxDurationMinutes, maxExternalSpendMicros?, allowedEffects[], materialChangeRule }, executionTarget: { kind: "git_repository", repositoryPath, baseCommit?, allowedPaths[], requiredCheckIds?[] }, sourceEvidence: { originalRequest, items: [{ id?, text, classification, role, source }], coverage: [{ itemId, field, target }] }, openQuestions[] }',
+    '', 'PACKAGE SHAPE (JSON for mcp__orc__draft_understanding.understanding): { mission: { statement, deliverables[] }, finalPicture: { summary, criteria: [{ id?, description }], constraints[], exclusions[] }, plan: { nodes: [{ id?, objective, acceptanceChecks[], dependsOn[], criterionIds[], resourceKeys?[], testPaths?[], fixesChecks?[] }], testDirs?[] }, team: { roles: [{ id?, kind: producer|reviewer, responsibility, nodeIds[] }] }, executionPolicy: { model, maxAgents, maxAttemptsPerNode, maxDurationMinutes, maxExternalSpendMicros?, allowedEffects[], materialChangeRule, capabilities: [{ need, why, by, permission? }] }, executionTarget: { kind: "git_repository", repositoryPath, baseCommit?, allowedPaths[], requiredCheckIds?[] }, sourceEvidence: { originalRequest, items: [{ id?, text, classification, role, source }], coverage: [{ itemId, field, target }] }, openQuestions[] }',
   ]
   return lines.join('\n')
 }
@@ -765,7 +775,9 @@ async function askGate($: EngineInterface) {
   askedGate = key
   let answer: string
   try {
-    answer = (await $.ui.ask(GATE_QUESTION[gate], { options: ['Approve', 'Defer'], header: gate === 'understanding' ? 'orc gate 1' : 'orc gate 2' })).trim()
+    const caps = gate === 'permission' ? m.understanding?.executionPolicy?.capabilities ?? [] : []
+    const question = caps.length ? `It will use: ${caps.map(c => c.need).join('; ')}. ${GATE_QUESTION[gate]}` : GATE_QUESTION[gate]
+    answer = (await $.ui.ask(question, { options: ['Approve', 'Defer'], header: gate === 'understanding' ? 'orc gate 1' : 'orc gate 2' })).trim()
   } catch {
     $.ui.status(`gate ${gate === 'understanding' ? 1 : 2} waits for you: the orc pane, or /orc approve · /orc correct <what to change> · /orc defer`)
     return
@@ -855,7 +867,9 @@ async function launchApprovedMission($: EngineInterface): Promise<string> {
   const withRules: OrcMission = { ...base, brief: { chars: orchestratorBrief(base).length, renders: [], spBefore: acct.sp, window: acct.window, windowSource: acct.windowSource } }
   await update($, missionState, () => withRules)
   await persistMission($, withRules)
-  await inboxPush($, { kind: 'notice', text: `orc mission (automatic): the owner approved the work. ${rules}\n\nMain-session specifics: ${mainSpecifics(m.understanding.executionPolicy.maxAgents)}` })
+  const caps = m.understanding.executionPolicy.capabilities ?? []
+  const frontLoad = caps.length ? `\n\nFIRST, before dispatching anything, while the owner is still here: use each approved tool once, in this turn, the way the work will use it (${caps.map(c => c.need).join('; ')}), so any permission prompt comes now and not in the middle of the run. Then tell the owner in one line that setup is done and they can step away. If a permission is refused, stop and say what it blocks. For page checks, serve the page locally (http://localhost) and check it there; never open an outside site to work around a tool limit.` : ''
+  await inboxPush($, { kind: 'notice', text: `orc mission (automatic): the owner approved the work.${frontLoad} ${rules}\n\nMain-session specifics: ${mainSpecifics(m.understanding.executionPolicy.maxAgents)}` })
   return `The main session is now the orchestrator for ${m.repo} (mission file ${missionPath}). Its working rules arrive as the next prompt; builders it dispatches get clones, checks and boundaries; wakes arrive as prompts.`
 }
 
@@ -3732,6 +3746,9 @@ export const register: Register = on => {
             ) : (
               <Text dimColor wrap="truncate">{`plan: ${(mis.understanding.plan?.nodes ?? []).length} steps · ${mis.understanding.executionPolicy?.maxAgents ?? '?'} agents at most · ${mis.understanding.executionPolicy?.maxDurationMinutes ?? '?'} min · mode ${mis.understanding.executionPolicy?.mode ?? 'normal'}`}</Text>
             )}
+            {!gateIs1 && (mis.understanding.executionPolicy?.capabilities ?? []).length ? (
+              <Text color="yellow" wrap="truncate">{`will use: ${(mis.understanding.executionPolicy?.capabilities ?? []).map(c => c.need).join('; ')}`}</Text>
+            ) : null}
             <Text dimColor wrap="truncate">{`${mis.understanding.finalPicture.criteria.length} criteria · full text: ${mis.dir}/UNDERSTANDING.md`}</Text>
             <Box marginTop={1}>
               <Button key="gate-approve" label="Approve" variant="primary" autoFocus onPress={() => { void recordDecision($, gateName, 'approve') }} />

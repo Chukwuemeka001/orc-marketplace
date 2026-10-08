@@ -116,13 +116,17 @@ export type OrcUnderstanding = {
   finalPicture: { summary: string; criteria: { id: string; description: string }[]; constraints: string[]; exclusions: string[] }
   plan: { nodes: { id: string; objective: string; acceptanceChecks: string[]; dependsOn: string[]; criterionIds: string[]; resourceKeys?: string[]; testPaths?: string[]; fixesChecks?: string[] }[]; testDirs?: string[] }
   team: { roles: { id: string; kind: 'producer' | 'reviewer'; responsibility: string; nodeIds: string[] }[] }
-  executionPolicy: { model: string; maxAgents: number; maxAttemptsPerNode: number; maxDurationMinutes: number; maxExternalSpendMicros?: number; allowedEffects: string[]; materialChangeRule: string; mode?: 'normal' | 'auto' }
+  executionPolicy: { model: string; maxAgents: number; maxAttemptsPerNode: number; maxDurationMinutes: number; maxExternalSpendMicros?: number; allowedEffects: string[]; materialChangeRule: string; mode?: 'normal' | 'auto'; capabilities?: OrcCapability[] }
   executionTarget: { kind: 'git_repository'; repositoryPath: string; baseCommit?: string; allowedPaths: string[]; requiredCheckIds?: string[] } | null
   sourceEvidence: { originalRequest: string; items: OrcEvidenceItem[]; coverage: { itemId: string; field: 'constraints' | 'exclusions' | 'criteria' | 'deliverables'; target: string }[] }
   openQuestions: string[]
   /** rules recommended with alternatives (gate 2): the owner sees the default and what else was considered */
   options?: { field: string; chosen: string; alternatives: string[]; why: string }[]
 }
+/** A tool or access beyond files and the shell that the work or its checks will use (a browser, a local server, a site,
+ *  another app, credentials): approved at gate 2, exercised once at the start so any permission prompt comes while the
+ *  owner is present. */
+export type OrcCapability = { need: string; why: string; by: string; permission?: string }
 export type OrcDecision = { at: number; gate: 'understanding' | 'permission'; choice: 'approve' | 'correct' | 'defer'; note?: string }
 /** One item of the main-loop inbox: what the main session must know (wake) or do (spawn, notice); delivered through the
  *  tool-result door (mid-turn) or the prompt door (idle), acknowledged by evidence, redelivered until then. */
