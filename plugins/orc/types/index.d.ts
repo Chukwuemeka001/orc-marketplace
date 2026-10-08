@@ -135,7 +135,7 @@ export type OrcInboxItem = {
   kind: 'wake' | 'spawn' | 'notice'
   text: string
   at: number
-  spawn?: { type: 'orc:verifier' | 'orc:integrator' | 'orc:orchestrator'; description: string; path: string }
+  spawn?: { type: 'orc:verifier' | 'orc:verifier-web' | 'orc:integrator' | 'orc:orchestrator'; description: string; path: string }
   delivered: { at: number; via: 'tool-result' | 'tool-context' | 'prompt' }[]
   ackedAt?: number
   ackedBy?: string

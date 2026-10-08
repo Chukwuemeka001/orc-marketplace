@@ -19,7 +19,7 @@ let DEFAULT_REPO = ''
 let CHECK_TIMEOUT_MS = 300000
 let LIVENESS_MINUTES = 12
 let SCRATCH_PREFIXES: string[] = ['/private/tmp/', '/tmp/', '/var/folders/', '/dev/null']
-type OrcConfig = { lab?: boolean; workersReadClaudeMd?: boolean; gateDialog?: boolean; outDir?: string; model?: string | null; effort?: 'low' | 'medium' | 'high' | null; defaultRepo?: string; checkTimeoutMs?: number; livenessMinutes?: number; scratchPrefixes?: string[]; labCompactAt?: number | null; labMaxCompactions?: number; workbenchDir?: string; labInjectVerifierDefect?: string | null }
+type OrcConfig = { lab?: boolean; workersReadClaudeMd?: boolean; gateDialog?: boolean; browser?: { command: string; args?: string[] } | null; browserOrigins?: string; outDir?: string; model?: string | null; effort?: 'low' | 'medium' | 'high' | null; defaultRepo?: string; checkTimeoutMs?: number; livenessMinutes?: number; scratchPrefixes?: string[]; labCompactAt?: number | null; labMaxCompactions?: number; workbenchDir?: string; labInjectVerifierDefect?: string | null }
 async function loadConfig($: EngineInterface): Promise<OrcConfig> {
   let configDir = ''
   try {
@@ -45,6 +45,8 @@ async function loadConfig($: EngineInterface): Promise<OrcConfig> {
   LAB = cfg.lab === true
   WORKERS_READ_CLAUDE_MD = cfg.workersReadClaudeMd !== false
   GATE_DIALOG = cfg.gateDialog !== false
+  BROWSER = cfg.browser && typeof cfg.browser.command === 'string' ? { command: cfg.browser.command.replace(/^~/, HOME), args: (cfg.browser.args ?? []).map(a => a.replace(/^~/, HOME)) } : null
+  BROWSER_ORIGINS = typeof cfg.browserOrigins === 'string' && cfg.browserOrigins ? cfg.browserOrigins : 'http://127.0.0.1:*;http://localhost:*'
   LAB_INJECT_DEFECT = typeof cfg.labInjectVerifierDefect === 'string' ? cfg.labInjectVerifierDefect : ''
   DEFAULT_REPO = (cfg.defaultRepo ?? HOME).replace(/^~/, HOME)
   if (cfg.checkTimeoutMs) CHECK_TIMEOUT_MS = cfg.checkTimeoutMs
@@ -71,6 +73,16 @@ let WORKERS_READ_CLAUDE_MD = true
 /** A pending gate is also asked in Claude Code's own question dialog (config "gateDialog": false keeps it to the pane and
  *  the commands). Owner, 2026-10-08: in the Desktop app the gate row "blended in so much" that he missed it. */
 let GATE_DIALOG = true
+/** The orc computer's browser (config "browser": {command, args}, e.g. Microsoft's Playwright MCP server): a headless
+ *  browser with its own in-memory profile, local pages only by default (config "browserOrigins"; a guardrail, not a
+ *  security boundary). Off unless configured. Only workers whose role gate 2 granted a browser get it. */
+let BROWSER: { command: string; args: string[] } | null = null
+let BROWSER_ORIGINS = 'http://127.0.0.1:*;http://localhost:*'
+const browserServer = () => BROWSER ? { command: BROWSER.command, args: [...BROWSER.args, '--headless', '--isolated', '--allowed-origins', BROWSER_ORIGINS, '--output-dir', `${OUT_DIR}/browser`] } : null
+/** The base role of a worker type: orc:builder-web works as orc:builder with a browser. */
+const baseType = (t: string) => t.replace(/-web$/, '')
+/** Did the approved plan grant a browser to this role (builder | verifier)? */
+const browserGranted = (m: OrcMission | null | undefined, role: string) => (m?.understanding?.executionPolicy?.capabilities ?? []).some(c => /browser|chrom|viewport|playwright/i.test(c.need) && new RegExp(role, 'i').test(c.by))
 /** The gate already asked in the dialog, so each gate is asked once: a correction adds a decision, so the redrafted gate
  *  is a new one. */
 let askedGate = ''
@@ -307,7 +319,7 @@ const isLedgerType = (t: string) => hasSwitch(t, 'ledger')
 const isChecksType = (t: string) => hasSwitch(t, 'checks')
 const isIntegType = (t: string) => hasSwitch(t, 'integ')
 /** children that carry a registered check and a write boundary of their own */
-const isCheckedChild = (t: string) => t === 'orc:builder' || t === 'orc:integrator'
+const isCheckedChild = (t: string) => baseType(t) === 'orc:builder' || t === 'orc:integrator'
 /** removal run: the wake carries only the returned child's result; the orchestrator keeps its own status file */
 const isNoLedger = (t: string) => hasSwitch(t, 'noledger')
 /** marker-file polling applies only to the older auto/bound types; fanin uses the request_verification action */
@@ -550,7 +562,7 @@ PHASE A — INTERVIEW (before gate 1)
 5. Draft the gate-1 part with mcp__orc__draft_understanding: mission (statement, deliverables), finalPicture (summary, criteria, constraints, exclusions), sourceEvidence, openQuestions (must be empty to request; unresolved ones block). Fix findings, draft again, then present it in plain words — the owner's request next to your interpretation, what you proposed vs what they said — and call mcp__orc__request_understanding. GATE 1 asks the owner: "is this what you mean?"
 
 PHASE B — PLAN AND RULES (after gate 1, before gate 2)
-6. Now draft the plan: plan.nodes (objective, runnable acceptanceChecks, dependsOn, criterionIds, resourceKeys = repo-relative paths the node may change) covering every criterion, acyclic; team.roles (producer and reviewer); executionPolicy (model, maxAgents 1–10, maxAttemptsPerNode, maxDurationMinutes, allowedEffects from local_read local_write network publication messaging spend client_data, materialChangeRule, capabilities); capabilities lists every tool or access beyond files and the shell that the work or its checks will use (a browser, a local server, a site, another app, credentials, a device) as {need, why, by: orchestrator|builder|verifier|integrator, permission: what the owner may be asked, if anything}, and is an empty list when there is none. The owner approves them at gate 2; right after approval you use each once so any permission prompt comes while they are present. For page checks, serve the page locally (http://localhost) rather than file:// or an outside site; executionTarget (git_repository: repositoryPath, allowedPaths, requiredCheckIds).
+6. Now draft the plan: plan.nodes (objective, runnable acceptanceChecks, dependsOn, criterionIds, resourceKeys = repo-relative paths the node may change) covering every criterion, acyclic; team.roles (producer and reviewer); executionPolicy (model, maxAgents 1–10, maxAttemptsPerNode, maxDurationMinutes, allowedEffects from local_read local_write network publication messaging spend client_data, materialChangeRule, capabilities); capabilities lists every tool or access beyond files and the shell that the work or its checks will use (a browser, a local server, a site, another app, credentials, a device) as {need, why, by: orchestrator|builder|verifier|integrator, permission: what the owner may be asked, if anything}, and is an empty list when there is none. A browser granted to builders or verifiers (by: builder | verifier) gives those workers orc's own headless browser when one is configured. The owner approves them at gate 2; right after approval you use each once so any permission prompt comes while they are present. For page checks, serve the page locally (http://localhost) rather than file:// or an outside site; executionTarget (git_repository: repositoryPath, allowedPaths, requiredCheckIds).
 7. RULES ARE RECOMMENDED, NOT IMPOSED: for maxAgents, maxDurationMinutes, allowedEffects, allowedPaths, executionPolicy.mode (normal: you dispatch and accept each child; auto: the approved plan runs as a Workbench graph by rule and you are pinged only on failures, gates and the end, which costs the orchestrator about half the tokens but runs slower; good for long or unattended work) and any constraint you added, record in options[] the chosen default, the alternatives you considered and why. options[] is a top-level array of the package (beside executionPolicy, not inside it), one entry per rule: {"field": "maxAgents", "chosen": "2", "alternatives": ["1 serial", "3 parallel"], "why": "two nodes are independent and the machine is loaded"}. The owner sees these at gate 2 and can correct any of them.
 8. Draft again (the full package), fix findings, present the plan and the rules in plain words, then call mcp__orc__request_permission. GATE 2 asks the owner: "approve this plan and these rules?" Only that approval starts work; the substrate generates the mission file from the package and the session (or a subagent, mode=subagent) orchestrates it.
 
@@ -868,8 +880,28 @@ async function launchApprovedMission($: EngineInterface): Promise<string> {
   await update($, missionState, () => withRules)
   await persistMission($, withRules)
   const caps = m.understanding.executionPolicy.capabilities ?? []
-  const frontLoad = caps.length ? `\n\nFIRST, before dispatching anything, while the owner is still here: use each approved tool once, in this turn, the way the work will use it (${caps.map(c => c.need).join('; ')}), so any permission prompt comes now and not in the middle of the run. Then tell the owner in one line that setup is done and they can step away. If a permission is refused, stop and say what it blocks. For page checks, serve the page locally (http://localhost) and check it there; never open an outside site to work around a tool limit.` : ''
-  await inboxPush($, { kind: 'notice', text: `orc mission (automatic): the owner approved the work.${frontLoad} ${rules}\n\nMain-session specifics: ${mainSpecifics(m.understanding.executionPolicy.maxAgents)}` })
+  // The orc computer: when gate 2 granted workers a browser, orc proves that browser now (a local page at 375 px), so a
+  // broken browser surfaces while the owner is here.
+  const webRoles = ['builder', 'verifier'].filter(r => browserGranted(m, r))
+  let computer = ''
+  if (webRoles.length) {
+    const server = browserServer()
+    if (!server) computer = `\n\nORC COMPUTER: gate 2 granted a browser to ${webRoles.join(' and ')}s, but no browser is configured for orc (config "browser"). Tell the owner before dispatching; checks that need it cannot run.`
+    else {
+      let res: { ok?: boolean; tools?: number; width?: number | null; error?: string } = {}
+      try {
+        const r = await $.process.run(['node', `${PLUGIN_ROOT}/bin/browser-check.mjs`, JSON.stringify(server)], { timeoutMs: 100000 })
+        res = JSON.parse(r.stdout.trim().split('\n').pop() ?? '{}')
+      } catch (err) { res = { ok: false, error: String(err) } }
+      await note($, { kind: 'note', text: `orc computer browser check: ${res.ok ? `ok (${res.tools} tools, ${res.width}px)` : `FAILED: ${short(res.error ?? '', 80)}`}` })
+      computer = res.ok
+        ? `\n\nORC COMPUTER: orc started the mission browser and opened a local page at ${res.width}px: it works. ${webRoles.map(r => `${r === 'builder' ? 'Builders' : 'Verifiers'} that need it run as orc:${r}-web`).join('; ')} (verifiers are dispatched that way for you; dispatch a builder whose step needs the browser as orc:builder-web, the others as orc:builder). It opens local pages only; you need not try it yourself.`
+        : `\n\nORC COMPUTER: the mission browser did NOT start: ${short(res.error ?? '', 200)}. Tell the owner now, before dispatching; checks that need it cannot run.`
+    }
+  }
+  const ownCaps = caps.filter(c => !(webRoles.length && BROWSER && /browser|chrom|viewport|playwright/i.test(c.need)))
+  const frontLoad = ownCaps.length ? `\n\nFIRST, before dispatching anything, while the owner is still here: use each approved tool once, in this turn, the way the work will use it (${ownCaps.map(c => c.need).join('; ')}), so any permission prompt comes now and not in the middle of the run. Then tell the owner in one line that setup is done and they can step away. If a permission is refused, stop and say what it blocks. For page checks, serve the page locally (http://localhost) and check it there; never open an outside site to work around a tool limit.` : ''
+  await inboxPush($, { kind: 'notice', text: `orc mission (automatic): the owner approved the work.${computer}${frontLoad} ${rules}\n\nMain-session specifics: ${mainSpecifics(m.understanding.executionPolicy.maxAgents)}` })
   return `The main session is now the orchestrator for ${m.repo} (mission file ${missionPath}). Its working rules arrive as the next prompt; builders it dispatches get clones, checks and boundaries; wakes arrive as prompts.`
 }
 
@@ -935,7 +967,7 @@ function orchState(map: Record<string, OrcAgent>, orch: OrcAgent) {
   return {
     running: kids.filter(live),
     unmarked: kids.filter(a => !live(a) && !a.mark),
-    pendingVer: (orch.verifyRequests ?? []).filter(v => !kids.some(k => k.type === typeOf(v.stage) && k.startedAt >= v.at - 2000 && !live(k))).map(v => v.stage as string),
+    pendingVer: (orch.verifyRequests ?? []).filter(v => !kids.some(k => baseType(k.type) === typeOf(v.stage) && k.startedAt >= v.at - 2000 && !live(k))).map(v => v.stage as string),
   }
 }
 
@@ -1958,12 +1990,12 @@ async function inboxSweep($: EngineInterface, map: Record<string, OrcAgent>, now
 }
 
 /** A spawn or a relay for the main loop: the brief goes to a file, the instruction to the inbox. */
-async function relayViaMain($: EngineInterface, kind: 'send' | 'spawn-verifier' | 'spawn-integrator' | 'spawn-orchestrator', payload: { to?: string; text?: string; description?: string; prompt?: string }): Promise<OrcInboxItem> {
+async function relayViaMain($: EngineInterface, kind: 'send' | 'spawn-verifier' | 'spawn-integrator' | 'spawn-orchestrator', payload: { to?: string; text?: string; description?: string; prompt?: string; web?: boolean }): Promise<OrcInboxItem> {
   const stamp = await $.clock.now()
   const path = `${OUT_DIR}/relay-${kind}-${stamp}.md`
   await $.fs.write(path, payload.text ?? payload.prompt ?? '')
   if (kind === 'send') return inboxPush($, { kind: 'notice', text: `deliver the file ${path} VERBATIM as a message to agent ${payload.to} using SendMessage (to: "${payload.to}", summary: "orc wake relay"). If the file is older than 10 minutes, prefix one line saying so.` })
-  const type = kind === 'spawn-integrator' ? 'orc:integrator' : kind === 'spawn-orchestrator' ? 'orc:orchestrator' : 'orc:verifier'
+  const type = kind === 'spawn-integrator' ? 'orc:integrator' : kind === 'spawn-orchestrator' ? 'orc:orchestrator' : payload.web ? 'orc:verifier-web' : 'orc:verifier'
   return inboxPush($, { kind: 'spawn', text: '', spawn: { type, description: payload.description ?? type, path } })
 }
 
@@ -2301,7 +2333,7 @@ function ledgerWake(map0: Record<string, OrcAgent>, orchId: string, returnedId: 
   const typeOf = (stage: string) => (stage === 'integration' ? 'orc:integrator' : 'orc:verifier')
   const stages = reqs.map(v => v.stage)
   const phase = stages.includes('final') ? 'final' : stages.includes('checkpoint') ? 'post-checkpoint' : 'pre-checkpoint'
-  const pendingVer = reqs.filter(v => !kids.some(k => k.type === typeOf(v.stage) && k.startedAt >= v.at - 2000 && state(k) !== 'running'))
+  const pendingVer = reqs.filter(v => !kids.some(k => baseType(k.type) === typeOf(v.stage) && k.startedAt >= v.at - 2000 && state(k) !== 'running'))
   const cloneBase = kids.find(k => k.worktree?.base)?.worktree?.base
   const repo = orch?.integration?.repo ?? reqs[reqs.length - 1]?.repo ?? cloneBase ?? '(not known until the first dispatch)'
   const lines: string[] = []
@@ -2349,7 +2381,7 @@ function ledgerWake(map0: Record<string, OrcAgent>, orchId: string, returnedId: 
   for (const a of unmarked.slice(0, 5)) actionable.push(`${a.id.slice(0, 7)} "${short(a.description, 30)}" returned ${ago(a.endedAt ?? now, now)}, still UNMARKED${a.reportPath ? ` (report ${a.reportPath})` : ''}`)
   if (unmarked.length > 5) actionable.push(`+${unmarked.length - 5} more unmarked (mcp__orc__status lists them)`)
   for (const v of pendingVer) {
-    const started = kids.some(k => k.type === typeOf(v.stage) && k.startedAt >= v.at - 2000)
+    const started = kids.some(k => baseType(k.type) === typeOf(v.stage) && k.startedAt >= v.at - 2000)
     actionable.push(`${v.stage} verification requested ${ago(v.at, now)}: ${started ? 'running, report pending' : 'being dispatched'}`)
   }
   lines.push(`ACTIONABLE: ${actionable.length ? actionable.join('; ') : 'nothing pending'}`)
@@ -2388,6 +2420,10 @@ export const register: Register = on => {
     const r = await next(e)
     if (r?.decision) return r
     const ev = e as unknown as { tool_name?: string; tool_input?: { file_path?: unknown; path?: unknown } }
+    if (String(ev.tool_name ?? '').startsWith('mcp__orc-browser__') && (await read($, missionState))?.status === 'running') {
+      await note($, { kind: 'note', text: `browser call allowed without a dialog: ${String(ev.tool_name)} (granted at gate 2)` })
+      return { ...(r ?? {}), decision: { behavior: 'allow' as const } }
+    }
     const root = ownReadRoot(String(ev.tool_name ?? ''), ev.tool_input, await read($, missionState), OUT_DIR, HOME)
     if (!root) return r
     await note($, { kind: 'note', text: `read allowed without a dialog: ${short(String(ev.tool_input?.file_path ?? ev.tool_input?.path ?? ''), 80)} (orc's own ${root === OUT_DIR ? 'data folder' : 'clones'})` })
@@ -2522,6 +2558,22 @@ export const register: Register = on => {
         await $.agent.register({ ...spec, ...(LAB_MODEL ? { model: LAB_MODEL } : {}), ...(LAB_EFFORT ? { effort: LAB_EFFORT } : {}), ...(WORKERS_READ_CLAUDE_MD ? {} : { omitClaudeMd: true as const }), mcpServers: [] })
       } catch (err) {
         $.ui.log(`orc: agent.register ${spec.name} failed: ${String(err)}`)
+      }
+    }
+    // The orc computer: a builder and a verifier that also hold the mission's browser (local pages only). Spawning one
+    // is refused unless gate 2 granted that role a browser.
+    const server = browserServer()
+    if (server) {
+      const browserLine = '\n\nYou also have a browser of your own: the mcp__orc-browser__* tools (headless, its own in-memory profile, local pages only: http://localhost or 127.0.0.1). To check a page, serve it locally (e.g. python3 -m http.server <port> --bind 127.0.0.1 in your directory), open it, then stop the server. Never try to reach an outside site.'
+      for (const spec of [
+        { name: 'builder-web', description: 'Builder with the mission browser (only when gate 2 granted builders a browser): implements one scoped work order in its own clone, commits by name.', prompt: BUILDER_PROMPT + browserLine, tools: [...CORE, 'mcp__orc-browser'] },
+        { name: 'verifier-web', description: 'Verifier with the mission browser (only when gate 2 granted verifiers a browser): checks done-means by running things and looking at pages; changes nothing.', prompt: VERIFIER_PROMPT + browserLine, tools: ['Read', 'Bash', 'Grep', 'Glob', 'mcp__orc-browser'] },
+      ]) {
+        try {
+          await $.agent.register({ ...spec, ...(LAB_MODEL ? { model: LAB_MODEL } : {}), ...(LAB_EFFORT ? { effort: LAB_EFFORT } : {}), ...(WORKERS_READ_CLAUDE_MD ? {} : { omitClaudeMd: true as const }), mcpServers: [{ 'orc-browser': server }] })
+        } catch (err) {
+          $.ui.log(`orc: agent.register ${spec.name} failed: ${String(err)}`)
+        }
       }
     }
 
@@ -2974,7 +3026,7 @@ export const register: Register = on => {
     }
     const description = `auto verifier: ${stage} [for ${orch.id.slice(0, 7)}]`
     const snap = await makeSnapshot($, repo, stage)
-    const item = await relayViaMain($, 'spawn-verifier', { description, prompt: VERIFIER_BRIEF(stage, repo, mission, amendment || '(none)', finalPath, snap, stage === 'checkpoint' && typeof input.note === 'string' ? short(input.note.trim(), 400) : undefined) })
+    const item = await relayViaMain($, 'spawn-verifier', { web: !!BROWSER && browserGranted(await read($, missionState), 'verifier'), description, prompt: VERIFIER_BRIEF(stage, repo, mission, amendment || '(none)', finalPath, snap, stage === 'checkpoint' && typeof input.note === 'string' ? short(input.note.trim(), 400) : undefined) })
     let spawnNow = ''
     if (orch.id === MAIN_ORCH) {
       await inboxMarkDelivered($, [item.id], 'tool-result')
@@ -3208,7 +3260,7 @@ export const register: Register = on => {
       text += ` · clone ${pr} (branch ${hit.worktree.branch} kept)`
     }
     // A marked verifier's snapshot is done with: remove the detached checkout it was pointed at.
-    if (hit.type === 'orc:verifier' && hit.parentId && !hit.description.startsWith('graph ')) {
+    if (baseType(hit.type) === 'orc:verifier' && hit.parentId && !hit.description.startsWith('graph ')) {
       const parent = map[hit.parentId]
       // The request this verifier answers is the LATEST one made before it started (an earlier, voided request must not match).
       const req = (parent?.verifyRequests ?? []).filter(v => v.snapshot && !v.pruned && v.stage !== 'integration' && v.at <= hit.startedAt + 2000).sort((a, b) => b.at - a.at)[0]
@@ -3355,10 +3407,17 @@ export const register: Register = on => {
     // Packet 2: an orc:* child spawned by the main session while it is the orchestrator belongs to the main row.
     const mainParent = !e.parentAgentId && !linkedParent && e.subagentType.startsWith('orc:') && e.subagentType !== 'orc:orchestrator' ? mainOrch(map0) : undefined
     const parent = e.parentAgentId ? map0[e.parentAgentId] : linkedParent ?? mainParent
-    if (mainParent && e.subagentType === 'orc:builder') {
+    if (e.subagentType.endsWith('-web')) {
+      const role = baseType(e.subagentType).replace(/^orc:/, '')
+      if (!browserGranted(await read($, missionState), role)) {
+        await note($, { kind: 'spawn', text: `spawn refused: ${e.subagentType} without a browser granted to ${role}s at gate 2` })
+        return { deny: `orc: the approved plan grants no browser to ${role}s. Spawn ${baseType(e.subagentType)} instead, or ask the owner to correct gate 2 (a capability with a browser, by: ${role}).` }
+      }
+    }
+    if (mainParent && baseType(e.subagentType) === 'orc:builder') {
       const mis = await read($, missionState)
       const cap = mis?.lab?.maxAgents ?? mis?.understanding?.executionPolicy.maxAgents ?? 3
-      const live = kidsOf(map0, mainParent).filter(a => a.type === 'orc:builder' && (a.status === 'running' || a.status === 'pending')).length
+      const live = kidsOf(map0, mainParent).filter(a => baseType(a.type) === 'orc:builder' && (a.status === 'running' || a.status === 'pending')).length
       if (live >= cap) {
         await note($, { kind: 'spawn', text: `spawn refused: ${live} builders live, owner limit ${cap}` })
         return { deny: `orc: the owner-approved limit is ${cap} builders at a time and ${live} are running; wait for a return (the wake) before dispatching more.` }
@@ -3374,7 +3433,7 @@ export const register: Register = on => {
       const may0 = /^MAY_CHANGE:\s*(.+)$/m.exec(e.prompt)?.[1]?.trim()
       const base0 = cwd0 && cwd0.startsWith('/') ? cwd0 : DEFAULT_REPO
       let root0 = base0
-      if (isFaninType(parent.type) && e.subagentType === 'orc:builder') {
+      if (isFaninType(parent.type) && baseType(e.subagentType) === 'orc:builder') {
         const made = await makeClone($, base0, e.description)
         if (made) {
           root0 = made.path
