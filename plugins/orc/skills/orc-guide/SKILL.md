@@ -34,7 +34,8 @@ description: Orchestration substrate for Claude Code (the orc plugin). Use when 
 - Act on "[orc wake]" prompts, not on raw task notifications. A wake is ordered the way you act: STATE (one line to
   re-orient), RETURNED, PROVED by the substrate (the registered check it ran, the boundary audit, the merge: never redo
   these), CLAIMED by the child (its report: judge it; spot-check only what the check does not cover), ALSO CHANGED,
-  ACTIONABLE, RUNNING. Record every verdict with `mcp__orc__mark` (accepted merges the clone and removes it). Pull state
+  ACTIONABLE, RUNNING. Record every verdict with `mcp__orc__mark` (accepted merges the clone and removes it). Steer a child that is heading the wrong way with `mcp__orc__steer {taskId, message}`: a running one reads it
+  with its next tool result, a finished one is resumed with it (e.g. a verifier about to fail work still being built). Pull state
   with `mcp__orc__status`. Children report in a fixed shape (builders: STATUS / CHANGED / CHECKED / NOT CHECKED /
   DEVIATIONS); put that shape in every work order.
 - `mcp__orc__request_verification` at checkpoint and final. Its result says SPAWN NOW: spawn that verifier in the same turn

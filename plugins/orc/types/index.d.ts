@@ -41,6 +41,8 @@ export type OrcAgent = {
   toolCalls: number
   toolErrors: number
   lastTool?: string
+  /** Steering messages from the orchestrator: read with the child's next tool result, or sent as a resume once it had finished. */
+  steers?: { at: number; text: string; deliveredAt?: number; via?: 'tool-result' | 'resume' }[]
   promptChars: number
   steps: number
   modelMs: number
