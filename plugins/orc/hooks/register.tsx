@@ -750,8 +750,8 @@ async function ownerContext($: EngineInterface, repo: string): Promise<string> {
 }
 
 const GATE_QUESTION = {
-  understanding: 'Approve this understanding, defer it, or type what to change under Other. Is this what you mean?',
-  permission: 'Approving starts the work. Defer, or type what to change under Other. Approve this plan and these rules?',
+  understanding: 'Approve this understanding, defer it, or type what to change. Is this what you mean?',
+  permission: 'Approving starts the work. Defer, or type what to change. Approve this plan and these rules?',
 } as const
 
 /** Ask a pending gate in Claude Code's own question dialog, once, when the session is idle. The answer goes through the
@@ -767,7 +767,7 @@ async function askGate($: EngineInterface) {
   try {
     answer = (await $.ui.ask(GATE_QUESTION[gate], { options: ['Approve', 'Defer'], header: gate === 'understanding' ? 'orc gate 1' : 'orc gate 2' })).trim()
   } catch {
-    $.ui.status(`orc: gate ${gate === 'understanding' ? 1 : 2} waits for you: the orc pane, or /orc approve · /orc correct <what to change> · /orc defer`)
+    $.ui.status(`gate ${gate === 'understanding' ? 1 : 2} waits for you: the orc pane, or /orc approve · /orc correct <what to change> · /orc defer`)
     return
   }
   const fresh = await read($, missionState)
@@ -3009,7 +3009,7 @@ export const register: Register = on => {
     const next: OrcMission = { ...m, status: 'understanding_requested', updatedAt: at }
     await update($, missionState, () => next); await persistMission($, next)
     openPane($)
-    $.ui.toast('orc: your approval is needed (gate 1: is this what you mean?)', { timeoutMs: 15000 })
+    $.ui.toast('your approval is needed (gate 1: is this what you mean?)', { timeoutMs: 15000 })
     return { result: `orc: understanding v${m.version} presented to the owner in the /orc pane (Approve / Correct / Defer; or /orc approve, /orc correct <note>, /orc defer). Wait for the owner; their decision arrives as a prompt. Do not request again.` }
   })
 
@@ -3024,7 +3024,7 @@ export const register: Register = on => {
     const next: OrcMission = { ...m, status: 'permission_requested', updatedAt: at }
     await update($, missionState, () => next); await persistMission($, next)
     openPane($)
-    $.ui.toast('orc: your approval is needed (gate 2: the plan and its rules)', { timeoutMs: 15000 })
+    $.ui.toast('your approval is needed (gate 2: the plan and its rules)', { timeoutMs: 15000 })
     const p = m.understanding.executionPolicy; const t = m.understanding.executionTarget
     return { result: `orc: plan & rules v${m.version} presented to the owner (gate 2): ${m.understanding.plan.nodes.length} nodes, ${p.maxAgents} agents max, ${p.maxAttemptsPerNode} attempts/node, ${p.maxDurationMinutes} min, effects ${p.allowedEffects.join(', ')}, paths ${t?.allowedPaths.join(' ') || '(whole repository)'}, repository ${m.repo}. Wait for the owner; approval starts the mission by itself.` }
   })
