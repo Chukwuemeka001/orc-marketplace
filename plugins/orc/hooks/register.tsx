@@ -21,11 +21,15 @@ let LIVENESS_MINUTES = 12
 let SCRATCH_PREFIXES: string[] = ['/private/tmp/', '/tmp/', '/var/folders/', '/dev/null']
 type OrcConfig = { lab?: boolean; workersReadClaudeMd?: boolean; outDir?: string; model?: string | null; effort?: 'low' | 'medium' | 'high' | null; defaultRepo?: string; checkTimeoutMs?: number; livenessMinutes?: number; scratchPrefixes?: string[]; labCompactAt?: number | null; labMaxCompactions?: number; workbenchDir?: string; labInjectVerifierDefect?: string | null }
 async function loadConfig($: EngineInterface): Promise<OrcConfig> {
+  let configDir = ''
   try {
-    const h = await $.process.run(['/bin/sh', '-c', 'echo "$HOME"'], { timeoutMs: 5000 })
-    HOME = h.stdout.trim() || HOME
+    const h = await $.process.run(['/bin/sh', '-c', 'printf "%s\\n%s" "$HOME" "$CLAUDE_CONFIG_DIR"'], { timeoutMs: 5000 })
+    const [home, cd] = h.stdout.split('\n')
+    HOME = (home ?? '').trim() || HOME
+    configDir = (cd ?? '').trim()
   } catch { /* keep default */ }
-  OUT_DIR = HOME ? `${HOME}/.claude/orc` : OUT_DIR
+  // orc keeps its data beside Claude Code's own: ~/.claude/orc, or <CLAUDE_CONFIG_DIR>/orc when that is set.
+  OUT_DIR = configDir ? `${configDir.replace(/\/+$/, '')}/orc` : HOME ? `${HOME}/.claude/orc` : OUT_DIR
   try { PLUGIN_ROOT = $.plugin.root } catch { /* older engine: keep '' */ }
   let cfg: OrcConfig = {}
   try {
@@ -340,7 +344,7 @@ async function notifyOrch($: EngineInterface, orchId: string, text: string) {
 }
 
 const VERIFIER_BRIEF = (stage: 'checkpoint' | 'final', repo: string, mission: string, amendment: string, finalPath: string, snap?: { path: string; sha: string }) =>
-  `You are an independent verifier dispatched by the substrate at the ${stage} of the mission in ${mission}. Repository: ${repo}. ` +
+  `You are an independent verifier dispatched by the substrate at the ${stage} of the mission in ${snap && mission.startsWith(`${repo}/`) ? `${snap.path}/${mission.slice(repo.length + 1)}` : mission}. Repository: ${repo}. ` +
   (snap
     ? `Check the SNAPSHOT at ${snap.path}: a detached copy of the repository at commit ${snap.sha.slice(0, 12)}, cut when verification was requested. Run everything there (cd into it); never read, run or write in ${repo} itself, which other agents may change while you work. `
     : `No snapshot could be cut, so check ${repo} as it is now; if git status shows files changing under you, say so in the report. `) +
@@ -1741,6 +1745,16 @@ async function makeSnapshot($: EngineInterface, repo: string, stage: string): Pr
     if (ran.exitCode !== 0) {
       $.ui.log(`orc: snapshot worktree failed: ${short(ran.stderr, 160)}`)
       return undefined
+    }
+    // The verifier may read only the snapshot, so it gets the mission files orc keeps uncommitted (v0.15.1 clean run:
+    // "MISSION.md is not in the snapshot and I was barred from the live repo").
+    for (const f of ['ops/orc/MISSION.md', 'ops/orc/UNDERSTANDING.md']) {
+      try {
+        if ((await $.fs.exists(`${repo}/${f}`)) && !(await $.fs.exists(`${path}/${f}`))) {
+          await $.process.run(['mkdir', '-p', `${path}/ops/orc`], { timeoutMs: 10000 })
+          await $.fs.write(`${path}/${f}`, await $.fs.read(`${repo}/${f}`))
+        }
+      } catch { /* best effort: the brief still names the mission */ }
     }
     return { path, sha, dirty }
   } catch (err) {

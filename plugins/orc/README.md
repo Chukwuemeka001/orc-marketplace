@@ -63,7 +63,7 @@ Measured on one mission with a hidden 15-test acceptance suite, the same model s
   - in auto mode, `brief.json`.
 - **Beside your repository, `<repo>-wt/`:** one clone per builder (removed after merging) and verifier snapshots.
   Branches `wt/*` are kept.
-- **In your home folder, `~/.claude/orc/`:** an effort ledger (every agent's requests, tools, context and results) and
+- **In your home folder, `~/.claude/orc/` (or `$CLAUDE_CONFIG_DIR/orc/`):** an effort ledger (every agent's requests, tools, context and results) and
   saved reports.
 
 A new session in a repository with a mission says so. `/orc resume` picks it up.
