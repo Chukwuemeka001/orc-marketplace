@@ -1,0 +1,113 @@
+{
+  "workbench_brief": 2,
+  "goal": "Find out what a semantic-version string may contain.",
+  "phase": {
+    "name": "research",
+    "objective": "Record the semver grammar rules, each with a source."
+  },
+  "later_phases": [],
+  "criteria": [
+    {
+      "id": "c1",
+      "text": "notes/semver.md lists the grammar rules and each bullet cites a source."
+    }
+  ],
+  "decisions": [
+    {
+      "id": "d1",
+      "question": "Which spec version?",
+      "choice": "semver 2.0.0",
+      "reversibility": "hard",
+      "status": "decided"
+    }
+  ],
+  "policy": {
+    "retry_budget_per_node": 2,
+    "max_parallel": 2,
+    "ping": "failures_only",
+    "caps": {
+      "max_agents": 3,
+      "max_retries_per_node": 3,
+      "max_minutes": 240
+    },
+    "allowed_effects": [
+      "local_read",
+      "local_write",
+      "network"
+    ]
+  },
+  "nodes": [
+    {
+      "id": "n1",
+      "role": "builder",
+      "work_type": "research",
+      "objective": "Record each semver grammar rule as a bullet ending with [src: URL].",
+      "inputs": [],
+      "outputs": [
+        "notes/semver.md"
+      ],
+      "paths": [
+        "notes/"
+      ],
+      "depends_on": [],
+      "check": "python3.11 -c \"import re,sys;t=open('notes/semver.md').read();c=re.findall(r'^- ',t,re.M);s=re.findall(r'\\[src: https?://\\S+\\]',t);sys.exit(0 if c and len(c)==len(s) else 1)\"",
+      "verifier": "research-reviewer: opens every cited source and confirms it states the bullet it is attached to",
+      "effects": [
+        "local_read",
+        "local_write",
+        "network"
+      ],
+      "tools": [
+        "python3.11"
+      ],
+      "credentials": [],
+      "criteria": [
+        "c1"
+      ],
+      "estimate_minutes": 15,
+      "sources": [
+        "https://semver.org/spec/v2.0.0.html"
+      ],
+      "claims_check": "every bullet ends with [src: https://semver.org/spec/v2.0.0.html]"
+    },
+    {
+      "id": "n2",
+      "role": "integrator",
+      "work_type": "code",
+      "objective": "Run the whole tool end to end and fix seams.",
+      "inputs": [
+        "notes/semver.md"
+      ],
+      "outputs": [],
+      "paths": [],
+      "depends_on": [
+        "n1"
+      ],
+      "check": "python3.11 -m unittest discover -s tests",
+      "verifier": "integration-reviewer",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [
+        "python3.11"
+      ],
+      "credentials": [],
+      "criteria": [
+        "c1"
+      ],
+      "estimate_minutes": 10
+    }
+  ],
+  "gates": [
+    {
+      "id": "g1",
+      "kind": "final",
+      "after": [
+        "n2"
+      ],
+      "check": "python3.11 -c \"import sys;sys.exit(0 if 'MAJOR' in open('notes/semver.md').read() else 1)\"",
+      "verifier": "final-reviewer"
+    }
+  ]
+}

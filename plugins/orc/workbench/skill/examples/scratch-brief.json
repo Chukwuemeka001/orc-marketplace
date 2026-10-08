@@ -1,0 +1,249 @@
+{
+  "workbench_brief": 1,
+  "goal": "A small Python tool that turns article titles into URL slugs, with a command-line front end and a README.",
+  "phase": {
+    "name": "build",
+    "objective": "Establish the slug rules from sources, then build the library, the CLI and the README and prove they work together."
+  },
+  "later_phases": [
+    {
+      "name": "packaging",
+      "goal": "Publish the tool as an installable package.",
+      "requires": [
+        "src/slug.py",
+        "d1"
+      ]
+    }
+  ],
+  "criteria": [
+    {
+      "id": "c1",
+      "text": "slugify() follows the rules recorded in notes/research.md, each tied to a source."
+    },
+    {
+      "id": "c2",
+      "text": "The CLI prints the slug for a title given as an argument or on stdin."
+    },
+    {
+      "id": "c3",
+      "text": "The README shows real slugify() output for three titles."
+    }
+  ],
+  "decisions": [
+    {
+      "id": "d1",
+      "question": "What characters may a slug contain?",
+      "choice": "ASCII lowercase letters, digits and single hyphens",
+      "reversibility": "hard",
+      "status": "decided"
+    },
+    {
+      "id": "d2",
+      "question": "Which licence?",
+      "choice": "",
+      "reversibility": "easy",
+      "status": "open"
+    }
+  ],
+  "policy": {
+    "retry_budget_per_node": 2,
+    "max_parallel": 2,
+    "ping": "failures_only",
+    "caps": {
+      "max_agents": 3,
+      "max_retries_per_node": 3,
+      "max_minutes": 240
+    },
+    "allowed_effects": [
+      "local_read",
+      "local_write",
+      "network"
+    ]
+  },
+  "nodes": [
+    {
+      "id": "n1",
+      "role": "builder",
+      "work_type": "research",
+      "objective": "Find how URL slugs are normally built (case, accents, punctuation, length) and record each rule as a bullet followed by [src: URL].",
+      "inputs": [],
+      "outputs": [
+        "notes/research.md"
+      ],
+      "paths": [
+        "notes/"
+      ],
+      "depends_on": [],
+      "check": "python3.11 -c \"import re,sys;t=open('notes/research.md').read();c=re.findall(r'^- ',t,re.M);s=re.findall(r'\\[src: https?://\\S+\\]',t);sys.exit(0 if c and len(c)==len(s) else 1)\"",
+      "verifier": "research-reviewer: opens every cited source and confirms it states the bullet it is attached to",
+      "effects": [
+        "local_read",
+        "local_write",
+        "network"
+      ],
+      "tools": [
+        "python3.11"
+      ],
+      "credentials": [],
+      "criteria": [
+        "c1"
+      ],
+      "estimate_minutes": 20
+    },
+    {
+      "id": "n2",
+      "role": "builder",
+      "work_type": "code",
+      "objective": "Write slugify(title) in src/slug.py implementing the rules in notes/research.md, with unit tests.",
+      "inputs": [
+        "notes/research.md"
+      ],
+      "outputs": [
+        "src/slug.py",
+        "tests/test_slug.py"
+      ],
+      "paths": [
+        "src/slug.py",
+        "tests/test_slug.py"
+      ],
+      "depends_on": [
+        "n1"
+      ],
+      "check": "python3.11 -m unittest tests.test_slug",
+      "verifier": "code-reviewer",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [
+        "python3.11"
+      ],
+      "credentials": [],
+      "criteria": [
+        "c1"
+      ],
+      "estimate_minutes": 25
+    },
+    {
+      "id": "n3",
+      "role": "builder",
+      "work_type": "code",
+      "objective": "Write the CLI in src/cli.py: slug for an argument, or for each line of stdin; with tests.",
+      "inputs": [
+        "src/slug.py"
+      ],
+      "outputs": [
+        "src/cli.py",
+        "tests/test_cli.py"
+      ],
+      "paths": [
+        "src/cli.py",
+        "tests/test_cli.py"
+      ],
+      "depends_on": [
+        "n2"
+      ],
+      "check": "python3.11 -m unittest tests.test_cli",
+      "verifier": "code-reviewer",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [
+        "python3.11"
+      ],
+      "credentials": [],
+      "criteria": [
+        "c2"
+      ],
+      "estimate_minutes": 20
+    },
+    {
+      "id": "n4",
+      "role": "builder",
+      "work_type": "docs",
+      "objective": "Write README.md: purpose, rules (from the research), and real slugify() output for three titles.",
+      "inputs": [
+        "src/slug.py"
+      ],
+      "outputs": [
+        "README.md"
+      ],
+      "paths": [
+        "README.md"
+      ],
+      "depends_on": [
+        "n2"
+      ],
+      "check": "python3.11 -c \"import sys;sys.path.insert(0,'src');import slug;print(slug.slugify('Hello, World!'))\"",
+      "verifier": "docs-reviewer: runs each README example and compares the output with the text",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [
+        "python3.11"
+      ],
+      "credentials": [],
+      "criteria": [
+        "c3"
+      ],
+      "estimate_minutes": 15
+    },
+    {
+      "id": "n5",
+      "role": "integrator",
+      "work_type": "code",
+      "objective": "Run the whole tool end to end and fix seams between the library, the CLI and the README.",
+      "inputs": [
+        "src/slug.py",
+        "src/cli.py",
+        "README.md"
+      ],
+      "outputs": [],
+      "paths": [],
+      "depends_on": [
+        "n1",
+        "n2",
+        "n3",
+        "n4"
+      ],
+      "check": "python3.11 -m unittest discover -s tests",
+      "verifier": "integration-reviewer",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [
+        "python3.11"
+      ],
+      "credentials": [],
+      "criteria": [
+        "c1",
+        "c2",
+        "c3"
+      ],
+      "estimate_minutes": 10
+    }
+  ],
+  "gates": [
+    {
+      "id": "g1",
+      "kind": "checkpoint",
+      "after": [
+        "n1"
+      ],
+      "check": "git status --short notes/",
+      "verifier": "checkpoint-reviewer"
+    },
+    {
+      "id": "g2",
+      "kind": "final",
+      "after": [
+        "n5"
+      ],
+      "check": "python3.11 src/cli.py 'Annual Report 2026' | grep -qx annual-report-2026",
+      "verifier": "final-reviewer"
+    }
+  ]
+}

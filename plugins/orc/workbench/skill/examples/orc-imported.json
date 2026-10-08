@@ -1,0 +1,172 @@
+{
+  "workbench_brief": 1,
+  "goal": "Build a durable forex position-size calculator for a USD-funded account: a single web page that takes balance, risk, stop loss and pair (plus a typed conversion rate when needed) and returns a correct lot size, pip value, dollar risk, R:R and lot breakdown, handling JPY pairs, USD-base pairs, crosses and bad input without ever showing a silently wrong number.",
+  "phase": {
+    "name": "",
+    "objective": ""
+  },
+  "later_phases": [],
+  "criteria": [
+    {
+      "id": "c1",
+      "text": "USD-quote pairs: EUR/USD, balance $10,000, risk 1%, SL 20 pips \u2192 pip value \"$10.00 per lot\" and lot size \"0.50 lots\"."
+    },
+    {
+      "id": "c2",
+      "text": "USD-base pairs: USD/JPY at price 150.00, balance $10,000, risk 1%, SL 25 pips \u2192 pip value \"$6.67 per lot\" and \"0.60 lots\" (JPY pip = 0.01)."
+    },
+    {
+      "id": "c3",
+      "text": "Crosses with a typed conversion rate: the page asks for the correct USD pair by name (EUR/GBP asks for GBP/USD; GBP/JPY asks for USD/JPY). EUR/GBP with GBP/USD 1.2500, balance $5,000, fixed risk $50, SL 10 pips \u2192 \"$12.50 per lot\", \"0.40 lots\". GBP/JPY with USD/JPY 150.00, balance $10,000, risk 1%, SL 30 pips \u2192 \"0.50 lots\"."
+    },
+    {
+      "id": "c4",
+      "text": "Risk can be entered as % of balance or as fixed $: 1% of $10,000 and fixed $100 give identical results for the same trade."
+    },
+    {
+      "id": "c5",
+      "text": "Lots are rounded DOWN to the lot step (default 0.01, editable) and the actual risk after rounding is shown and is never above the requested risk: EUR/USD, $1,000, 1%, SL 15 pips \u2192 \"0.06 lots\", actual risk \"$9.00\". If the result is below one lot step the page says so (e.g. \"Risk too small for minimum lot 0.01\") instead of showing 0 lots."
+    },
+    {
+      "id": "c6",
+      "text": "Optional take profit in pips gives reward and R:R: EUR/USD 0.50 lots, SL 20, TP 50 \u2192 reward \"$250.00\" and \"R:R 1:2.50\"."
+    },
+    {
+      "id": "c7",
+      "text": "Stop loss can come from entry and SL prices instead of pips: EUR/USD entry 1.10000, SL 1.09750 \u2192 \"25.0 pips\"; USD/JPY entry 150.000, SL 150.250 \u2192 \"25.0 pips\"."
+    },
+    {
+      "id": "c8",
+      "text": "Lot breakdown shown for the result: 0.50 lots \u2192 \"0.50 standard \u00b7 5.0 mini \u00b7 50 micro \u00b7 50,000 units\"."
+    },
+    {
+      "id": "c9",
+      "text": "Durable input handling: blank, zero or negative balance/stop/rate/lot step, risk % above 100, or a missing conversion rate each produce a visible message naming the field and NO lot size; the text \"NaN\", \"Infinity\" or \"undefined\" never appears on the page."
+    },
+    {
+      "id": "c10",
+      "text": "Works offline: index.html opened directly as a file (file://) with no network calculates correctly and makes no external requests."
+    },
+    {
+      "id": "c11",
+      "text": "`node --test` in ~/forex-calculator passes with zero dependencies installed and covers the worked examples in c1\u2013c9."
+    },
+    {
+      "id": "c12",
+      "text": "Usable on a phone: at 375px width all inputs and results are readable with no horizontal scroll."
+    }
+  ],
+  "decisions": [],
+  "policy": {
+    "retry_budget_per_node": 2,
+    "max_parallel": 2,
+    "ping": "failures_only",
+    "caps": {
+      "max_agents": 2,
+      "max_retries_per_node": 2,
+      "max_minutes": 90
+    },
+    "allowed_effects": [
+      "local_read",
+      "local_write"
+    ]
+  },
+  "nodes": [
+    {
+      "id": "n1",
+      "role": "builder",
+      "work_type": "code",
+      "objective": "calc.js: pure, dependency-free calculation + formatting core. Pair table (28 pairs, pip size 0.01 for JPY-quoted else 0.0001), which conversion pair a cross needs and in which direction, pip value per standard lot in USD, risk from % or $, lots rounded DOWN to lot step, actual risk, reward and R:R, price-to-pips, lot breakdown, input validation returning named-field errors, and a computeView(inputs) function returning exactly the display strings (\"0.50 lots\", \"$10.00 per lot\", \"R:R 1:2.50\", breakdown line) or errors. Loads as a classic browser script (window.FXCalc) and via require() in Node. Tests in test/calc.test.js cover every worked example in c1\u2013c9.",
+      "inputs": [],
+      "outputs": [],
+      "paths": [
+        "calc.js",
+        "test/calc.test.js"
+      ],
+      "depends_on": [],
+      "check": "cd ~/forex-calculator && node --test  # exits 0\ntest/calc.test.js contains assertions for each exact string in c1, c2, c3, c4, c5, c6, c7, c8 and the error cases in c9\nnode -e \"const f=require('./calc.js'); console.log(f.computeView({pair:'EURUSD',balance:10000,riskMode:'pct',risk:1,slPips:20,lotStep:0.01}).lots)\"  # prints 0.50 lots\ngrep -c 'import \\|export ' calc.js  # 0 (classic script, not an ES module)",
+      "verifier": "r2",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [],
+      "credentials": [],
+      "criteria": [
+        "c1",
+        "c2",
+        "c3",
+        "c4",
+        "c5",
+        "c6",
+        "c7",
+        "c8",
+        "c9",
+        "c11"
+      ],
+      "estimate_minutes": 30.0
+    },
+    {
+      "id": "n2",
+      "role": "builder",
+      "work_type": "code",
+      "objective": "index.html: the page. Pair picker (28 pairs), balance, risk with %/$ toggle, stop as pips OR entry+SL prices, optional TP pips, lot step (default 0.01), and a price/conversion-rate field that appears only when needed and is labelled with the exact pair to type (e.g. 'GBP/USD rate'). Recalculates on input via FXCalc.computeView; shows errors inline naming the field and hides results when invalid. Inline CSS, mobile-first, no external URLs, loads calc.js with a plain <script src=\"calc.js\">. Add test/page.test.js with static checks.",
+      "inputs": [],
+      "outputs": [],
+      "paths": [
+        "index.html",
+        "test/page.test.js"
+      ],
+      "depends_on": [
+        "n1"
+      ],
+      "check": "cd ~/forex-calculator && node --test  # exits 0, includes test/page.test.js\ntest/page.test.js asserts: no http:// or https:// in index.html; calc.js loaded by a non-module <script src>; all 28 pairs present in the picker\nMain-session browser check (built-in browser, file:// URL): EUR/USD $10,000 1% SL 20 shows '0.50 lots'; EUR/GBP shows a 'GBP/USD' rate field and with 1.25, $50, SL 10 shows '0.40 lots'; blank balance shows a named error and no lot size; page text never contains NaN/Infinity/undefined; no network requests other than calc.js\nMain-session browser check at 375px width: document.documentElement.scrollWidth <= 375",
+      "verifier": "r2",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [],
+      "credentials": [],
+      "criteria": [
+        "c3",
+        "c4",
+        "c6",
+        "c7",
+        "c9",
+        "c10",
+        "c12"
+      ],
+      "estimate_minutes": 30.0
+    },
+    {
+      "id": "n3",
+      "role": "builder",
+      "work_type": "code",
+      "objective": "README.md: how to open the page (desktop and phone), the formulas (pip size, pip value for USD-quote / USD-base / cross pairs, lot rounding down), the worked examples from c1\u2013c8, and the exclusions.",
+      "inputs": [],
+      "outputs": [],
+      "paths": [
+        "README.md"
+      ],
+      "depends_on": [
+        "n1",
+        "n2"
+      ],
+      "check": "README.md exists and every number in its worked examples matches node -e output from calc.js computeView for the same inputs\ncd ~/forex-calculator && node --test  # still exits 0",
+      "verifier": "r2",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [],
+      "credentials": [],
+      "criteria": [
+        "c10",
+        "c11"
+      ],
+      "estimate_minutes": 30.0
+    }
+  ],
+  "gates": []
+}

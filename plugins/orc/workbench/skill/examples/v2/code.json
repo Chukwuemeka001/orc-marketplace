@@ -1,0 +1,109 @@
+{
+  "workbench_brief": 2,
+  "goal": "A function that parses durations like '1h30m' into seconds.",
+  "phase": {
+    "name": "build",
+    "objective": "Write and test parse_duration."
+  },
+  "later_phases": [],
+  "criteria": [
+    {
+      "id": "c1",
+      "text": "parse_duration('1h30m') returns 5400 and bad input raises ValueError."
+    }
+  ],
+  "decisions": [
+    {
+      "id": "d1",
+      "question": "What units are supported?",
+      "choice": "h, m and s, in that order",
+      "reversibility": "hard",
+      "status": "decided"
+    }
+  ],
+  "policy": {
+    "retry_budget_per_node": 2,
+    "max_parallel": 2,
+    "ping": "failures_only",
+    "caps": {
+      "max_agents": 3,
+      "max_retries_per_node": 3,
+      "max_minutes": 240
+    },
+    "allowed_effects": [
+      "local_read",
+      "local_write"
+    ]
+  },
+  "nodes": [
+    {
+      "id": "n1",
+      "role": "builder",
+      "work_type": "code",
+      "objective": "Write parse_duration(text) in src/duration.py with unit tests.",
+      "inputs": [],
+      "outputs": [
+        "src/duration.py",
+        "tests/test_duration.py"
+      ],
+      "paths": [
+        "src/duration.py",
+        "tests/test_duration.py"
+      ],
+      "depends_on": [],
+      "check": "python3.11 -m unittest tests.test_duration",
+      "verifier": "code-reviewer",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [
+        "python3.11"
+      ],
+      "credentials": [],
+      "criteria": [
+        "c1"
+      ],
+      "estimate_minutes": 20
+    },
+    {
+      "id": "n2",
+      "role": "integrator",
+      "work_type": "code",
+      "objective": "Run the whole tool end to end and fix seams.",
+      "inputs": [
+        "src/duration.py"
+      ],
+      "outputs": [],
+      "paths": [],
+      "depends_on": [
+        "n1"
+      ],
+      "check": "python3.11 -m unittest discover -s tests",
+      "verifier": "integration-reviewer",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [
+        "python3.11"
+      ],
+      "credentials": [],
+      "criteria": [
+        "c1"
+      ],
+      "estimate_minutes": 10
+    }
+  ],
+  "gates": [
+    {
+      "id": "g1",
+      "kind": "final",
+      "after": [
+        "n2"
+      ],
+      "check": "python3.11 -c \"import sys;sys.path.insert(0,'src');import duration;sys.exit(0 if duration.parse_duration('1h30m')==5400 else 1)\"",
+      "verifier": "final-reviewer"
+    }
+  ]
+}

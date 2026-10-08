@@ -1,0 +1,113 @@
+{
+  "workbench_brief": 2,
+  "goal": "A README for a slug tool whose numbers are true.",
+  "phase": {
+    "name": "docs",
+    "objective": "Write the README and check it against the code."
+  },
+  "later_phases": [],
+  "criteria": [
+    {
+      "id": "c1",
+      "text": "The README shows real slugify() output for 'Hello, World!'."
+    }
+  ],
+  "decisions": [
+    {
+      "id": "d1",
+      "question": "Which slug alphabet?",
+      "choice": "ASCII lowercase letters, digits, single hyphens",
+      "reversibility": "hard",
+      "status": "decided"
+    }
+  ],
+  "policy": {
+    "retry_budget_per_node": 2,
+    "max_parallel": 2,
+    "ping": "failures_only",
+    "caps": {
+      "max_agents": 3,
+      "max_retries_per_node": 3,
+      "max_minutes": 240
+    },
+    "allowed_effects": [
+      "local_read",
+      "local_write"
+    ]
+  },
+  "nodes": [
+    {
+      "id": "n1",
+      "role": "builder",
+      "work_type": "docs",
+      "objective": "Write README.md: purpose and real slugify() output for 'Hello, World!'.",
+      "inputs": [
+        "src/slug.py"
+      ],
+      "outputs": [
+        "README.md"
+      ],
+      "paths": [
+        "README.md"
+      ],
+      "depends_on": [],
+      "check": "python3.11 -c \"import sys;sys.path.insert(0,'src');import slug;sys.exit(0 if slug.slugify('Hello, World!')=='hello-world' else 1)\"",
+      "verifier": "docs-reviewer: runs each README example and compares the output with the text",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [
+        "python3.11"
+      ],
+      "credentials": [],
+      "criteria": [
+        "c1"
+      ],
+      "estimate_minutes": 10,
+      "checked_against": [
+        "src/slug.py",
+        "fact: slugify('Hello, World!') == 'hello-world'"
+      ]
+    },
+    {
+      "id": "n2",
+      "role": "integrator",
+      "work_type": "code",
+      "objective": "Run the whole tool end to end and fix seams.",
+      "inputs": [
+        "README.md"
+      ],
+      "outputs": [],
+      "paths": [],
+      "depends_on": [
+        "n1"
+      ],
+      "check": "python3.11 -m unittest discover -s tests",
+      "verifier": "integration-reviewer",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [
+        "python3.11"
+      ],
+      "credentials": [],
+      "criteria": [
+        "c1"
+      ],
+      "estimate_minutes": 10
+    }
+  ],
+  "gates": [
+    {
+      "id": "g1",
+      "kind": "final",
+      "after": [
+        "n2"
+      ],
+      "check": "python3.11 -c \"import sys;sys.exit(0 if 'hello-world' in open('README.md').read() else 1)\"",
+      "verifier": "final-reviewer"
+    }
+  ]
+}

@@ -1,0 +1,117 @@
+{
+  "workbench_brief": 2,
+  "goal": "A single page that converts Celsius to Fahrenheit.",
+  "phase": {
+    "name": "build",
+    "objective": "Build the page and prove it in a browser."
+  },
+  "later_phases": [],
+  "criteria": [
+    {
+      "id": "c1",
+      "text": "Entering 100 shows '212 F'; empty input shows an error, never NaN."
+    }
+  ],
+  "decisions": [
+    {
+      "id": "d1",
+      "question": "Where does the page run?",
+      "choice": "opened from disk as file://index.html, no server",
+      "reversibility": "hard",
+      "status": "decided"
+    }
+  ],
+  "policy": {
+    "retry_budget_per_node": 2,
+    "max_parallel": 2,
+    "ping": "failures_only",
+    "caps": {
+      "max_agents": 3,
+      "max_retries_per_node": 3,
+      "max_minutes": 240
+    },
+    "allowed_effects": [
+      "local_read",
+      "local_write"
+    ]
+  },
+  "nodes": [
+    {
+      "id": "n1",
+      "role": "builder",
+      "work_type": "frontend",
+      "objective": "Build index.html with one input and a result line, no network.",
+      "inputs": [],
+      "outputs": [
+        "index.html",
+        "test/page_static.py"
+      ],
+      "paths": [
+        "index.html",
+        "test/page_static.py"
+      ],
+      "depends_on": [],
+      "check": "python3.11 test/page_static.py",
+      "verifier": "browser-reviewer: opens the page and runs every browser_check step",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [
+        "python3.11"
+      ],
+      "credentials": [],
+      "criteria": [
+        "c1"
+      ],
+      "estimate_minutes": 20,
+      "browser_check": {
+        "target": "file://index.html",
+        "steps": [
+          "type 100 in the input: the page shows '212 F'",
+          "clear the input: an error message shows and the page text has no NaN",
+          "at 375px width there is no horizontal scroll"
+        ]
+      }
+    },
+    {
+      "id": "n2",
+      "role": "integrator",
+      "work_type": "code",
+      "objective": "Run the whole tool end to end and fix seams.",
+      "inputs": [
+        "index.html"
+      ],
+      "outputs": [],
+      "paths": [],
+      "depends_on": [
+        "n1"
+      ],
+      "check": "python3.11 -m unittest discover -s tests",
+      "verifier": "integration-reviewer",
+      "effects": [
+        "local_read",
+        "local_write"
+      ],
+      "tools": [
+        "python3.11"
+      ],
+      "credentials": [],
+      "criteria": [
+        "c1"
+      ],
+      "estimate_minutes": 10
+    }
+  ],
+  "gates": [
+    {
+      "id": "g1",
+      "kind": "final",
+      "after": [
+        "n2"
+      ],
+      "check": "python3.11 -c \"import sys;sys.exit(1 if 'http' in open('index.html').read() else 0)\"",
+      "verifier": "final-reviewer"
+    }
+  ]
+}
