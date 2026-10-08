@@ -1774,7 +1774,8 @@ async function makeSnapshot($: EngineInterface, repo: string, stage: string): Pr
     if (head.exitCode !== 0) return undefined
     const sha = head.stdout.trim()
     const st = await $.process.run(['git', '-C', repo, 'status', '--porcelain'], { timeoutMs: 10000 })
-    const dirtyFiles = st.stdout.split('\n').filter(Boolean).map(l => l.slice(3))
+    // orc's own state folder is not the work: its mission files are copied into the snapshot below.
+    const dirtyFiles = st.stdout.split('\n').filter(Boolean).map(l => l.slice(3)).filter(f => !f.startsWith('ops/orc/') && f !== 'ops/orc')
     const dirty = dirtyFiles.length ? `${dirtyFiles.slice(0, 5).join(', ')}${dirtyFiles.length > 5 ? ` +${dirtyFiles.length - 5}` : ''}` : ''
     const root = `${repo.replace(/\/+$/, '')}-wt`
     const path = `${root}/verify-${stage}-${sha.slice(0, 7)}-${(await $.clock.now()).toString(36).slice(-5)}`
