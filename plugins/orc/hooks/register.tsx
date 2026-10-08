@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import { ownReadRoot, shellMask, sweepsStage, browserGranted, computerOf, sandboxSettingsFor } from './policy'
+import { ownReadRoot, shellMask, sweepsStage, browserGranted, computerOf, sandboxSettingsFor, SAFE_BROWSER_TOOLS, UNSAFE_BROWSER_TOOLS, browserCallAllowed } from './policy'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { OrcActivity, OrcAgent, OrcBucket, OrcClass, OrcCompaction, OrcDemo, OrcEntry, OrcGraph, OrcGraphNode, OrcInboxItem, OrcMission, OrcTurn, OrcUnderstanding } from '../types'
@@ -122,7 +122,7 @@ const sandboxWords = (s: 'on' | 'after-restart' | 'off') => (s === 'on' ? 'this 
 /** One line describing the computer, for cards, the dialog and UNDERSTANDING.md. */
 function computerLine(m: OrcMission, status?: 'on' | 'after-restart' | 'off') {
   const c = computerOf(m)
-  return `computer: browser ${c.browser.length ? `→ ${c.browser.join(' and ')}s (own profile, local pages only)` : 'none'} · network ${c.hosts.length ? c.hosts.join(', ') : 'off (local pages only)'} · writes: repo + clones${status ? ` · sandbox ${sandboxWords(status)}` : ''}`
+  return `computer: browser ${c.browser.length ? `→ ${c.browser.map(r => `${r}s`).join(' and ')} (own profile, local pages only)` : 'none'} · network ${c.hosts.length ? c.hosts.join(', ') : 'off (local pages only)'} · writes: repo + clones${status ? ` · sandbox ${sandboxWords(status)}` : ''}`
 }
 /** /orc computer on|off: write (or remove) the sandbox settings for this repository, creating the repository first —
  *  a sandboxed session cannot create one, nor write to one made after it started. */
@@ -859,7 +859,7 @@ async function askGate($: EngineInterface) {
   try {
     const caps = gate === 'permission' ? m.understanding?.executionPolicy?.capabilities ?? [] : []
     const outside = gate === 'permission' && (await sandboxStatus($, m.repo)) === 'off'
-    const question = caps.length ? `It will use: ${caps.map(c => c.need).join('; ')}. ${GATE_QUESTION[gate]}` : GATE_QUESTION[gate]
+    const question = caps.length ? `It will use: ${[...new Set(caps.map(c => c.need))].join('; ')}. ${GATE_QUESTION[gate]}` : GATE_QUESTION[gate]
     answer = (await $.ui.ask(question, { options: outside ? ['Approve', 'Use the computer first', 'Defer'] : ['Approve', 'Defer'], header: gate === 'understanding' ? 'orc gate 1' : 'orc gate 2' })).trim()
   } catch {
     $.ui.status(`gate ${gate === 'understanding' ? 1 : 2} waits for you: the orc pane, or /orc approve · /orc correct <what to change> · /orc defer`)
@@ -867,7 +867,10 @@ async function askGate($: EngineInterface) {
   }
   const fresh = await read($, missionState)
   if (!fresh || fresh.status !== m.status || fresh.version !== m.version) { $.ui.log('orc: that gate was already decided; the dialog answer was not used.'); return }
-  if (answer === 'Use the computer first') { $.ui.log((await computerSwitch($, true)).replace(/^orc computer:\s*/, '') + ' The gate waits for you there.'); return }
+  if (answer === 'Use the computer first') {
+    for (const line of `${(await computerSwitch($, true)).replace(/^orc computer:\s*/, '')}\nThe gate waits for you there.`.split('\n')) $.ui.log(line)
+    return
+  }
   const text = answer === 'Approve' ? await recordDecision($, gate, 'approve') : answer === 'Defer' ? await recordDecision($, gate, 'defer') : answer ? await recordDecision($, gate, 'correct', answer) : 'orc: empty answer; the gate still waits.'
   $.ui.status(undefined)
   $.ui.log(text.replace(/^orc:\s*/, ''))
@@ -2498,7 +2501,7 @@ export const register: Register = on => {
     const r = await next(e)
     if (r?.decision) return r
     const ev = e as unknown as { tool_name?: string; tool_input?: { file_path?: unknown; path?: unknown } }
-    if (String(ev.tool_name ?? '').startsWith('mcp__orc-browser__') && (await read($, missionState))?.status === 'running') {
+    if (browserCallAllowed(String(ev.tool_name ?? '')) && (await read($, missionState))?.status === 'running') {
       await note($, { kind: 'note', text: `browser call allowed without a dialog: ${String(ev.tool_name)} (granted at gate 2)` })
       return { ...(r ?? {}), decision: { behavior: 'allow' as const } }
     }
@@ -2643,10 +2646,10 @@ export const register: Register = on => {
     // is refused unless gate 2 granted that role a browser.
     const server = browserServer()
     if (server) {
-      const browserLine = '\n\nYou also have a browser of your own: the mcp__orc-browser__* tools (headless, its own in-memory profile, local pages only: http://localhost or 127.0.0.1). To check a page, serve it locally (e.g. python3 -m http.server <port> --bind 127.0.0.1 in your directory), open it, then stop the server. Never try to reach an outside site.'
+      const browserLine = '\n\nYou also have a browser of your own: the mcp__orc-browser__* tools (headless, its own in-memory profile, local pages only: http://localhost or 127.0.0.1). Measure pages with browser_resize, browser_navigate and browser_evaluate (it runs in the page). To check a page, serve it locally (e.g. python3 -m http.server <port> --bind 127.0.0.1 in your directory), open it, then stop the server. Never try to reach an outside site.'
       for (const spec of [
-        { name: 'builder-web', description: 'Builder with the mission browser (only when gate 2 granted builders a browser): implements one scoped work order in its own clone, commits by name.', prompt: BUILDER_PROMPT + browserLine, tools: [...CORE, 'mcp__orc-browser'] },
-        { name: 'verifier-web', description: 'Verifier with the mission browser (only when gate 2 granted verifiers a browser): checks done-means by running things and looking at pages; changes nothing.', prompt: VERIFIER_PROMPT + browserLine, tools: ['Read', 'Bash', 'Grep', 'Glob', 'mcp__orc-browser'] },
+        { name: 'builder-web', description: 'Builder with the mission browser (only when gate 2 granted builders a browser): implements one scoped work order in its own clone, commits by name.', prompt: BUILDER_PROMPT + browserLine, tools: [...CORE, ...SAFE_BROWSER_TOOLS], disallowedTools: UNSAFE_BROWSER_TOOLS },
+        { name: 'verifier-web', description: 'Verifier with the mission browser (only when gate 2 granted verifiers a browser): checks done-means by running things and looking at pages; changes nothing.', prompt: VERIFIER_PROMPT + browserLine, tools: ['Read', 'Bash', 'Grep', 'Glob', ...SAFE_BROWSER_TOOLS], disallowedTools: UNSAFE_BROWSER_TOOLS },
       ]) {
         try {
           await $.agent.register({ ...spec, ...(LAB_MODEL ? { model: LAB_MODEL } : {}), ...(LAB_EFFORT ? { effort: LAB_EFFORT } : {}), ...(WORKERS_READ_CLAUDE_MD ? {} : { omitClaudeMd: true as const }), mcpServers: [{ 'orc-browser': server }] })
@@ -2661,7 +2664,7 @@ export const register: Register = on => {
       const repo0 = top.stdout.trim()
       if (repo0 && (await $.fs.exists(`${missionDir(repo0)}/state.json`))) {
         const st = JSON.parse(await $.fs.read(`${missionDir(repo0)}/state.json`)) as OrcMission
-        const line = `orc: this repository holds mission v${st.version} (${st.status}): /orc resume picks it up`
+        const line = `this repository holds mission v${st.version} (${st.status}): /orc resume picks it up`
         $.ui.log(line)
         $.ui.toast(line)
       }
@@ -3894,7 +3897,7 @@ export const register: Register = on => {
               <Text dimColor wrap="truncate">{`plan: ${(mis.understanding.plan?.nodes ?? []).length} steps · ${mis.understanding.executionPolicy?.maxAgents ?? '?'} agents at most · ${mis.understanding.executionPolicy?.maxDurationMinutes ?? '?'} min · mode ${mis.understanding.executionPolicy?.mode ?? 'normal'}`}</Text>
             )}
             {!gateIs1 && (mis.understanding.executionPolicy?.capabilities ?? []).length ? (
-              <Text color="yellow" wrap="truncate">{`will use: ${(mis.understanding.executionPolicy?.capabilities ?? []).map(c => c.need).join('; ')}`}</Text>
+              <Text color="yellow" wrap="truncate">{`will use: ${[...new Set((mis.understanding.executionPolicy?.capabilities ?? []).map(c => c.need))].join('; ')}`}</Text>
             ) : null}
             {!gateIs1 && sbStatus ? <Text wrap="truncate">{computerLine(mis, sbStatus)}</Text> : null}
             <Text dimColor wrap="truncate">{`${mis.understanding.finalPicture.criteria.length} criteria · full text: ${mis.dir}/UNDERSTANDING.md`}</Text>

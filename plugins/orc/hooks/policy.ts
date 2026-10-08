@@ -45,3 +45,13 @@ export function sandboxSettingsFor(m: PlanLike) {
   const c = computerOf(m)
   return { enabled: true, allowUnsandboxedCommands: false, filesystem: { allowWrite: [c.workspace[1]] }, network: { allowLocalBinding: true, allowedDomains: c.hosts } }
 }
+
+/** The browser tools a worker may hold. Withheld, because they act outside the sandbox from the browser server's own
+ *  process: browser_run_code_unsafe ("executes arbitrary JavaScript in the Playwright server process"),
+ *  browser_file_upload and browser_drop (read local files). browser_evaluate runs in the page, so it stays.
+ *  (orc computer v1 live test, 2026-10-08: a builder used browser_run_code_unsafe for its layout check.) */
+export const BROWSER_SERVER = 'orc-browser'
+export const SAFE_BROWSER_TOOLS = ['browser_navigate', 'browser_navigate_back', 'browser_resize', 'browser_snapshot', 'browser_take_screenshot', 'browser_evaluate', 'browser_click', 'browser_type', 'browser_press_key', 'browser_hover', 'browser_select_option', 'browser_fill_form', 'browser_drag', 'browser_wait_for', 'browser_console_messages', 'browser_network_requests', 'browser_network_request', 'browser_find', 'browser_emulate_media', 'browser_handle_dialog', 'browser_tabs', 'browser_close'].map(t => `mcp__${BROWSER_SERVER}__${t}`)
+export const UNSAFE_BROWSER_TOOLS = ['browser_run_code_unsafe', 'browser_file_upload', 'browser_drop'].map(t => `mcp__${BROWSER_SERVER}__${t}`)
+/** May orc approve this browser call without a dialog? Only a listed safe tool. */
+export const browserCallAllowed = (tool: string) => SAFE_BROWSER_TOOLS.includes(tool)

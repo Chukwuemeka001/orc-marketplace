@@ -1,6 +1,6 @@
 // Smoke tests for what a stranger meets first. Run: claude plugin test <plugin-dir>
 import { test, expect, describe } from 'claude-code/testing'
-import { ownReadRoot, sweepsStage, shellMask, browserGranted, computerOf, sandboxSettingsFor } from '../hooks/policy'
+import { ownReadRoot, sweepsStage, shellMask, browserGranted, computerOf, sandboxSettingsFor, browserCallAllowed, SAFE_BROWSER_TOOLS, UNSAFE_BROWSER_TOOLS } from '../hooks/policy'
 
 describe('outside the lab', () => {
   test('/orc demo is a lab feature', async ($) => {
@@ -102,5 +102,18 @@ describe('the orc computer', () => {
     expect(sb.filesystem.allowWrite).toEqual(['/work/site-wt'])
     expect(sb.network.allowLocalBinding).toBe(true)
     expect(sb.network.allowedDomains).toEqual(['api.github.com'])
+  })
+})
+
+describe('the browser tools a worker may hold', () => {
+  test('page tools are allowed', async () => {
+    for (const t of ['browser_navigate', 'browser_resize', 'browser_evaluate', 'browser_snapshot', 'browser_take_screenshot']) expect(browserCallAllowed(`mcp__orc-browser__${t}`)).toBe(true)
+  })
+  test('tools that act outside the sandbox are withheld (v1 live test: a builder used run_code_unsafe)', async () => {
+    for (const t of ['browser_run_code_unsafe', 'browser_file_upload', 'browser_drop']) expect(browserCallAllowed(`mcp__orc-browser__${t}`)).toBe(false)
+    for (const t of UNSAFE_BROWSER_TOOLS) expect(SAFE_BROWSER_TOOLS.includes(t)).toBe(false)
+  })
+  test('another server\'s tools are never approved by this rule', async () => {
+    expect(browserCallAllowed('mcp__other__browser_navigate')).toBe(false)
   })
 })
