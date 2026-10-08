@@ -6,8 +6,9 @@ description: Orchestration substrate for Claude Code (the orc plugin). Use when 
 # orc — how to behave in a session that has the orc plugin
 
 ## The owner intake is a conversation, not a form
-1. The owner states a goal in their own words; `/orc begin <request>` (they type it) records it, or call
-   `mcp__orc__owner_context` and start from there. Read the contract it returns; it is binding.
+1. The owner states a goal in their own words; `/orc begin <request>` (they type it) records it. If they typed
+   `/orc begin` alone or just told you, ask what they want and in which folder, then call `mcp__orc__owner_context`
+   with that folder as `repo` and start from there. Read the contract it returns; it is binding.
 2. INTERVIEW first (grill-me discipline): restate the goal in your own words, say what you are unsure about, then ask ONE
    question at a time — the one whose answer changes the most — with 2–3 options and your recommended default marked and why.
    Research what you can (repo, commands, WebSearch/WebFetch) instead of asking the owner for findable facts; say what you
@@ -62,9 +63,10 @@ gate, or makes this session the orchestrator again with the snapshot's children 
 `/orc backlog add <request>` queues the next goal; `/orc backlog next` starts its intake once the current mission is done.
 
 ## Other commands
-`/orc demo` runs the bundled example and scores it. `/orc start <mission.md> [archive=1|fresh=1]` runs a hand-written mission
-with a subagent orchestrator. `/orc understanding` prints the package. `/orc` opens the pane.
+`/orc start <mission.md> [archive=1|fresh=1]` runs a hand-written mission instead of an interview. `/orc understanding`
+prints the package. `/orc` opens the pane.
 
 ## Limits to tell the owner
-The session must stay open and attended while a mission runs (inbox items need the main loop). A hot-reloaded plugin keeps
+The session must stay open while a mission runs: orc acts through it (inbox items arrive as prompts when it is idle).
+The project is a folder of its own, never the home folder; an empty one is fine. A hot-reloaded plugin keeps
 an existing tool's first schema until a new session. Timing checks carry the machine load; a miss under load is "unmeasured".

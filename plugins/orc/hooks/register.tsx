@@ -636,6 +636,7 @@ function validateUnderstanding(u: OrcUnderstanding, stage: 1 | 2 = 2): string[] 
   else {
     if (t.kind !== 'git_repository') f.push('executionTarget.kind must be git_repository')
     if (!str(t.repositoryPath) || !t.repositoryPath.startsWith('/')) f.push('executionTarget.repositoryPath must be an absolute path')
+    else if (isHomeOrRoot(t.repositoryPath)) f.push('executionTarget.repositoryPath is the home folder (or /): choose a project folder for this work; an empty one is fine (orc runs git init there)')
     t.allowedPaths = arr(t.allowedPaths) ? t.allowedPaths : []
     for (const ap of t.allowedPaths) if (ap.startsWith('/') || ap.includes('..')) f.push(`allowedPaths entry "${ap}" must be repo-relative without ..`)
   }
@@ -707,6 +708,9 @@ async function persistMission($: EngineInterface, m: OrcMission) {
     $.ui.log(`orc: mission persist failed: ${String(err)}`)
   }
 }
+
+/** The home folder or / is never a project: orc would run git init there and cut clones beside it. */
+const isHomeOrRoot = (p: string) => { const x = p.replace(/^~(?=\/|$)/, HOME).replace(/\/+$/, '') || '/'; return x === '/' || x === HOME.replace(/\/+$/, '') }
 
 async function repoOf($: EngineInterface, given?: string): Promise<string> {
   if (given && given.trim()) return given.trim().replace(/^~/, HOME).replace(/\/+$/, '')
@@ -3451,8 +3455,12 @@ export const register: Register = on => {
       const rest = argv.replace(/^begin\s*/, '')
       const repoArg = /(?:^|\s)repo=(\S+)/.exec(rest)?.[1]
       const request = rest.replace(/(?:^|\s)repo=\S+/, '').replace(/(?:^|\s)mode=\S+/, '').trim()
-      if (!request) return { text: 'orc begin: usage: /orc begin [repo=<path>] <your request in your own words>' }
+      if (!request) {
+        await inboxPush($, { kind: 'notice', text: 'orc intake (automatic): the owner typed /orc begin without a request. Ask them, in plain words, what they want built and which folder it should live in (a project folder, never their home folder; an empty one is fine). Then call mcp__orc__owner_context with repo set to that folder and interview them as its contract says.' })
+        return { text: 'orc: tell the session what you want built, in your own words, and which folder it belongs in. It will interview you, then ask you to approve its understanding and its plan before anything runs.' }
+      }
       const repo = await repoOf($, repoArg)
+      if (isHomeOrRoot(repo)) return { text: `orc begin: ${repo} is your home folder, which orc will not use as a project (it runs git init there). Name a folder: /orc begin repo=~/projects/<name> ${short(request, 60)}` }
       const at = await $.clock.now()
       const prev = await read($, missionState)
       const version = prev && prev.repo === repo ? prev.version + 1 : 1
