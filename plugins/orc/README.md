@@ -74,6 +74,34 @@ orc works in Claude Code's default permission mode. While a mission you approved
 repository. Every other permission decision stays with Claude Code and you. Builders cannot edit or stage files
 outside the paths the plan gave them, and orc audits the files their shell commands write.
 
+## The orc computer (preview)
+A mission can run inside a computer of its own on your machine:
+- **Writes:** only to the repository and orc's clones beside it.
+- **Network:** none, apart from hosts the plan names; local pages always work.
+- **Browser:** a headless one with its own empty profile, kept apart from yours. Only the workers whose role you
+  granted a browser at gate 2 get it.
+
+How it works:
+- **Walls:** Claude Code's built-in sandbox (OS-enforced: Seatbelt on macOS, bubblewrap on Linux). Shell commands
+  inside it need no approval.
+- **Browser:** Microsoft's Playwright MCP server, fetched with npx on first use (about 14 MB), driving the Chrome,
+  Chrome Canary or Edge you have installed. With none installed, orc tells you how to add one.
+- **Granted at gate 2:** gate 2 lists what the work will use. A browser granted to verifiers or builders gives those
+  workers the `orc:verifier-web` / `orc:builder-web` types, and orc refuses them to anyone not granted.
+- **Checked at launch:** orc opens a local page with the browser before anything is dispatched, so a problem shows
+  up while you are there.
+
+Turn it on with `/orc computer on`, or choose "Use the computer first" at gate 2. orc creates the repository if
+needed and writes the sandbox settings into `.claude/settings.local.json` (kept out of git). The sandbox is set
+when a session starts, so restart Claude Code in that folder and type `/orc resume`. `/orc computer` shows the
+computer and whether this session is inside it; `/orc computer off` turns it off.
+
+Limits:
+- The repository must exist before a sandboxed session starts; `/orc computer on` takes care of that.
+- The browser's site list is a guardrail, not a security boundary (Playwright's own words). The sandbox and the
+  separate profile are the walls; virtual-machine isolation is not part of the preview.
+- To keep the browser out entirely: `"browser": false` in the config.
+
 ## Commands
 | command | what it does |
 |---|---|
@@ -85,17 +113,22 @@ outside the paths the plan gave them, and orc audits the files their shell comma
 | `/orc backlog add <request>`, `/orc backlog next` | queue what comes next |
 | `/orc policy retry=N parallel=N ping=failures_only` | change a running graph's rules (auto mode) |
 | `/orc understanding` | print the approved understanding |
+| `/orc computer [on\|off]` | show the mission's computer, or set it up for the next session |
 | `/orc start <mission.md> [repo=…] [amendment=…]` | start from a written mission file instead of an interview |
 
 ## Configuration (optional)
 `~/.claude/orc/config.json`:
 ```json
-{ "model": null, "effort": null, "workersReadClaudeMd": true, "checkTimeoutMs": 300000 }
+{ "model": null, "effort": null, "workersReadClaudeMd": true, "checkTimeoutMs": 300000, "gateDialog": true,
+  "browser": { "command": "npx", "args": ["-y", "@playwright/mcp@0.0.83"] } }
 ```
 - `model` and `effort` apply to every orc agent; `null` keeps the session's. A model approved at gate 2 overrides
   `model`.
 - `workersReadClaudeMd: false` gives builders and verifiers no CLAUDE.md.
 - `workbenchDir` points auto mode at another copy of the Workbench.
+- `browser`: the browser tool the orc computer uses (`false` turns it off); `browserOrigins` widens the local-only
+  site list.
+- `gateDialog: false` keeps gates in the pane and the commands only.
 
 ## Limits
 - Keep the session open while a mission runs; orc acts through it.

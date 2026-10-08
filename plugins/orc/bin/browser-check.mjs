@@ -5,8 +5,12 @@
 import { spawn } from 'node:child_process'
 import http from 'node:http'
 const cfg = JSON.parse(process.argv[2] ?? '{}')
-const done = (o) => { console.log(JSON.stringify(o)); process.exit(0) }
-const timer = setTimeout(() => done({ ok: false, error: 'timed out after 90 s' }), 90000)
+// Plain-words reasons for the failures people actually hit.
+const explain = (e) => /ENOENT/.test(e) && /npx|node/.test(e) ? `${e} (orc's browser needs Node.js 18 or later, which provides npx)`
+  : /Executable doesn't exist|browserType\.launch|Failed to launch|chromium/i.test(e) ? `no browser to drive: install Google Chrome, or run "npx playwright install chromium" (about 150 MB). Detail: ${e.slice(0, 160)}`
+  : e
+const done = (o) => { if (o.error) o.error = explain(String(o.error)); console.log(JSON.stringify(o)); process.exit(0) }
+const timer = setTimeout(() => done({ ok: false, error: 'timed out after 170 s (the first use downloads the browser tool; try again)' }), 170000)
 const server = http.createServer((q, r) => { r.writeHead(200, { 'content-type': 'text/html' }); r.end('<!doctype html><meta name="viewport" content="width=device-width"><h1>orc browser check</h1>') })
 server.listen(0, '127.0.0.1', async () => {
   const port = server.address().port

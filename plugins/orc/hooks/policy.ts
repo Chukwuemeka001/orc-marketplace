@@ -26,3 +26,22 @@ export function sweepsStage(cmd: string): boolean {
   const { masked } = shellMask(cmd)
   return /\bgit\s+(add|stage)\b[^;&|\n]*(\s-A\b|\s--all\b|\s\.(\s|$))/m.test(masked) || /\bgit\s+commit\b[^;&|\n]*\s(-a|--all|-am)\b/m.test(masked)
 }
+
+/** The part of a mission the computer rules read. */
+export type PlanLike = { repo: string; understanding?: { executionPolicy?: { capabilities?: { need: string; why?: string; by: string; permission?: string }[] } } | null }
+
+/** Did the approved plan grant a browser to this role (builder | verifier)? */
+export const browserGranted = (m: PlanLike | null | undefined, role: string) => (m?.understanding?.executionPolicy?.capabilities ?? []).some(c => /browser|chrom|viewport|playwright/i.test(c.need) && new RegExp(role, 'i').test(c.by))
+
+/** The orc computer for a mission: the workspace (repo + clones), the hosts the plan named, who holds the browser. */
+export function computerOf(m: PlanLike) {
+  const caps = m.understanding?.executionPolicy?.capabilities ?? []
+  const hosts = [...new Set(caps.flatMap(c => (`${c.need} ${c.permission ?? ''}`.match(/\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|ai|app|co|ca|uk)\b/gi) ?? []).map(h => h.toLowerCase())))]
+  const browser = ['builder', 'verifier'].filter(r => browserGranted(m, r))
+  return { workspace: [m.repo, `${m.repo.replace(/\/+$/, '')}-wt`], hosts, browser }
+}
+/** The sandbox settings that make this mission's computer (Claude Code's built-in sandbox; fixed at session start). */
+export function sandboxSettingsFor(m: PlanLike) {
+  const c = computerOf(m)
+  return { enabled: true, allowUnsandboxedCommands: false, filesystem: { allowWrite: [c.workspace[1]] }, network: { allowLocalBinding: true, allowedDomains: c.hosts } }
+}

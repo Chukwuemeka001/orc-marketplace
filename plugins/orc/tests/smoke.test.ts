@@ -1,6 +1,6 @@
 // Smoke tests for what a stranger meets first. Run: claude plugin test <plugin-dir>
 import { test, expect, describe } from 'claude-code/testing'
-import { ownReadRoot, sweepsStage, shellMask } from '../hooks/policy'
+import { ownReadRoot, sweepsStage, shellMask, browserGranted, computerOf, sandboxSettingsFor } from '../hooks/policy'
 
 describe('outside the lab', () => {
   test('/orc demo is a lab feature', async ($) => {
@@ -76,5 +76,31 @@ describe('the sweep guard reads commands, not quoted text', () => {
     const { code, masked } = shellMask('git add "my file.txt" b.txt')
     expect(masked.length).toBe(code.length)
     expect(code.slice(8, 21)).toBe('"my file.txt"')
+  })
+})
+
+describe('the orc computer', () => {
+  const plan = (caps: { need: string; by: string }[]) => ({ repo: '/work/site', understanding: { executionPolicy: { capabilities: caps.map(c => ({ ...c, why: 'x' })) } } })
+  test('a browser granted to verifiers goes to verifiers only', async () => {
+    const m = plan([{ need: 'headless browser on http://localhost', by: 'verifier' }])
+    expect(browserGranted(m, 'verifier')).toBe(true)
+    expect(browserGranted(m, 'builder')).toBe(false)
+    expect(computerOf(m).browser).toEqual(['verifier'])
+  })
+  test('no capabilities: no browser, no network, writes to repo and clones', async () => {
+    const c = computerOf(plan([]))
+    expect(c.browser).toEqual([])
+    expect(c.hosts).toEqual([])
+    expect(c.workspace).toEqual(['/work/site', '/work/site-wt'])
+  })
+  test('hosts the plan names become the allowed domains', async () => {
+    const m = plan([{ need: 'network: api.github.com for release notes', by: 'builder' }, { need: 'browser at localhost', by: 'builder' }])
+    expect(computerOf(m).hosts).toEqual(['api.github.com'])
+    const sb = sandboxSettingsFor(m) as { enabled: boolean; allowUnsandboxedCommands: boolean; filesystem: { allowWrite: string[] }; network: { allowLocalBinding: boolean; allowedDomains: string[] } }
+    expect(sb.enabled).toBe(true)
+    expect(sb.allowUnsandboxedCommands).toBe(false)
+    expect(sb.filesystem.allowWrite).toEqual(['/work/site-wt'])
+    expect(sb.network.allowLocalBinding).toBe(true)
+    expect(sb.network.allowedDomains).toEqual(['api.github.com'])
   })
 })

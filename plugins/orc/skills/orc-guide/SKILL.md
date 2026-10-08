@@ -60,6 +60,13 @@ description: Orchestration substrate for Claude Code (the orc plugin). Use when 
 - Never edit the orc plugin's own files while a mission runs: the substrate denies it (a save would hot-reload the plugin
   mid-mission). If the owner wants it anyway, they type `/orc allow-edit`; you cannot.
 
+## The orc computer (preview)
+`/orc computer` shows the mission's computer: writes to the repo and clones only, the network the plan names, and a
+headless browser for the roles gate 2 granted (`orc:verifier-web`, `orc:builder-web`). `/orc computer on` (or
+"Use the computer first" at gate 2) writes the sandbox settings and needs a restart plus `/orc resume`. Dispatch a
+builder whose step needs the browser as `orc:builder-web`; orc dispatches web verifiers itself and refuses `-web`
+workers that were not granted.
+
 ## Durable state and resume
 Everything lives in `<repo>/ops/orc/` (state.json, UNDERSTANDING.md, MISSION.md) plus `ops/DECISIONS.md`, `ops/FINAL.md`.
 A new session in that repository is told a mission exists; `/orc resume` (or `mcp__orc__resume`) restores the intake at its

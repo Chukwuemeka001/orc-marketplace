@@ -160,6 +160,8 @@ export type OrcMission = {
   snapshot?: { at: number; cursor: number; children: { id: string; type: string; description: string; status: string; startedAt: number; endedAt?: number; mark?: string; merged?: string; branch?: string; reportPath?: string; check?: string }[]; verifyRequests: { id: string; stage: 'checkpoint' | 'final' | 'integration'; at: number }[]; integrationRuns: { at: number; after: string; status: 'pass' | 'fail' | 'unavailable'; load?: number }[] }
   /** owner override of the plugin edit lock for this mission (/orc allow-edit); cleared at settle */
   editUnlocked?: boolean
+  /** The orc computer: set by /orc computer on|off (the sandbox settings orc wrote for this repository). */
+  computer?: { on: boolean; at: number; settingsPath: string }
   directives?: { at: number; text: string }[]
   backlog?: { id: string; request: string; at: number; status: 'queued' | 'started' | 'done' }[]
   /** where the working rules were written at launch (the orchestrator brief points at it; it survives compaction) */

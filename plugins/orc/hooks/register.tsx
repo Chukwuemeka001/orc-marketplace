@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import { ownReadRoot, shellMask, sweepsStage } from './policy'
+import { ownReadRoot, shellMask, sweepsStage, browserGranted, computerOf, sandboxSettingsFor } from './policy'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { OrcActivity, OrcAgent, OrcBucket, OrcClass, OrcCompaction, OrcDemo, OrcEntry, OrcGraph, OrcGraphNode, OrcInboxItem, OrcMission, OrcTurn, OrcUnderstanding } from '../types'
@@ -45,7 +45,10 @@ async function loadConfig($: EngineInterface): Promise<OrcConfig> {
   LAB = cfg.lab === true
   WORKERS_READ_CLAUDE_MD = cfg.workersReadClaudeMd !== false
   GATE_DIALOG = cfg.gateDialog !== false
-  BROWSER = cfg.browser && typeof cfg.browser.command === 'string' ? { command: cfg.browser.command.replace(/^~/, HOME), args: (cfg.browser.args ?? []).map(a => a.replace(/^~/, HOME)) } : null
+  BROWSER = cfg.browser === null || (cfg.browser as unknown) === false ? null
+    : cfg.browser && typeof cfg.browser.command === 'string' ? { command: cfg.browser.command.replace(/^~/, HOME), args: (cfg.browser.args ?? []).map(a => a.replace(/^~/, HOME)) }
+    : { command: 'npx', args: ['-y', '@playwright/mcp@0.0.83', ...(await installedChromeArgs($))] }
+  CONFIG_DIR = configDir || `${HOME}/.claude`
   BROWSER_ORIGINS = typeof cfg.browserOrigins === 'string' && cfg.browserOrigins ? cfg.browserOrigins : 'http://127.0.0.1:*;http://localhost:*'
   LAB_INJECT_DEFECT = typeof cfg.labInjectVerifierDefect === 'string' ? cfg.labInjectVerifierDefect : ''
   DEFAULT_REPO = (cfg.defaultRepo ?? HOME).replace(/^~/, HOME)
@@ -78,11 +81,76 @@ let GATE_DIALOG = true
  *  security boundary). Off unless configured. Only workers whose role gate 2 granted a browser get it. */
 let BROWSER: { command: string; args: string[] } | null = null
 let BROWSER_ORIGINS = 'http://127.0.0.1:*;http://localhost:*'
+let CONFIG_DIR = ''
+/** Which installed Chrome the default browser drives: Google Chrome, else Chrome Canary, else Edge; none means
+ *  Playwright's own Chromium, which the launch check reports how to install. */
+async function installedChromeArgs($: EngineInterface): Promise<string[]> {
+  const mac = [['/Applications/Google Chrome.app', ['--browser', 'chrome']], ['/Applications/Google Chrome Canary.app', ['--executable-path', '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary']], ['/Applications/Microsoft Edge.app', ['--browser', 'msedge']]] as const
+  for (const [app, args] of mac) if (await $.fs.exists(app).catch(() => false)) return [...args]
+  try {
+    const r = await $.process.run(['/bin/sh', '-c', 'command -v google-chrome || command -v google-chrome-stable || command -v microsoft-edge'], { timeoutMs: 5000 })
+    if (/google-chrome/.test(r.stdout)) return ['--browser', 'chrome']
+    if (/microsoft-edge/.test(r.stdout)) return ['--browser', 'msedge']
+  } catch { /* none */ }
+  return []
+}
 const browserServer = () => BROWSER ? { command: BROWSER.command, args: [...BROWSER.args, '--headless', '--isolated', '--allowed-origins', BROWSER_ORIGINS, '--output-dir', `${OUT_DIR}/browser`] } : null
+/** Is this session inside the computer? Read from the settings files (no API reports it); settings written after the
+ *  session started take effect at the next start. */
+async function sandboxStatus($: EngineInterface, repo: string): Promise<'on' | 'after-restart' | 'off'> {
+  for (const f of [`${repo}/.claude/settings.local.json`, `${repo}/.claude/settings.json`, `${CONFIG_DIR}/settings.json`]) {
+    try {
+      const j = JSON.parse(await $.fs.read(f)) as { sandbox?: { enabled?: boolean } }
+      if (j.sandbox?.enabled !== true) continue
+      const st = await $.process.run(['/bin/sh', '-c', `stat -f %m "${f}" 2>/dev/null || stat -c %Y "${f}"`], { timeoutMs: 5000 })
+      const mtime = Number(st.stdout.trim()) * 1000
+      return mtime && SESSION_STARTED && mtime > SESSION_STARTED ? 'after-restart' : 'on'
+    } catch { /* missing or not JSON */ }
+  }
+  return 'off'
+}
+let sandboxCache: { repo: string; at: number; status: 'on' | 'after-restart' | 'off' } | undefined
+/** The pane redraws every few seconds: read the settings at most every 10 s. */
+async function sandboxStatusCached($: EngineInterface, repo: string) {
+  const now = await $.clock.now()
+  if (sandboxCache && sandboxCache.repo === repo && now - sandboxCache.at < 10000) return sandboxCache.status
+  const status = await sandboxStatus($, repo)
+  sandboxCache = { repo, at: now, status }
+  return status
+}
+const sandboxWords = (s: 'on' | 'after-restart' | 'off') => (s === 'on' ? 'this session is inside it' : s === 'after-restart' ? 'set; restart the session to step inside' : 'off for this session (/orc computer on)')
+/** One line describing the computer, for cards, the dialog and UNDERSTANDING.md. */
+function computerLine(m: OrcMission, status?: 'on' | 'after-restart' | 'off') {
+  const c = computerOf(m)
+  return `computer: browser ${c.browser.length ? `→ ${c.browser.join(' and ')}s (own profile, local pages only)` : 'none'} · network ${c.hosts.length ? c.hosts.join(', ') : 'off (local pages only)'} · writes: repo + clones${status ? ` · sandbox ${sandboxWords(status)}` : ''}`
+}
+/** /orc computer on|off: write (or remove) the sandbox settings for this repository, creating the repository first —
+ *  a sandboxed session cannot create one, nor write to one made after it started. */
+async function computerSwitch($: EngineInterface, turnOn: boolean): Promise<string> {
+  const m = await read($, missionState)
+  const repo = m?.repo ?? (await repoOf($, undefined))
+  if (isHomeOrRoot(repo)) return `orc computer: ${repo} is your home folder; start a mission in a project folder first.`
+  const path = `${repo}/.claude/settings.local.json`
+  let j: Record<string, unknown> = {}
+  try { j = JSON.parse(await $.fs.read(path)) as Record<string, unknown> } catch { j = {} }
+  if (turnOn) {
+    const inside = await $.process.run(['git', '-C', repo, 'rev-parse', '--git-dir'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1 }))
+    if (inside.exitCode !== 0) await $.process.run(['/bin/sh', '-c', `mkdir -p "${repo}" && git -C "${repo}" init -q`], { timeoutMs: 15000 })
+    j.sandbox = m ? sandboxSettingsFor(m) : { enabled: true, allowUnsandboxedCommands: false, filesystem: { allowWrite: [`${repo.replace(/\/+$/, '')}-wt`] }, network: { allowLocalBinding: true, allowedDomains: [] } }
+  } else delete j.sandbox
+  await $.process.run(['mkdir', '-p', `${repo}/.claude`], { timeoutMs: 5000 })
+  await $.fs.write(path, JSON.stringify(j, null, 2) + '\n')
+  try { await $.process.run(['/bin/sh', '-c', `cd "${repo}" && mkdir -p .git/info && (grep -qxF '.claude/settings.local.json' .git/info/exclude 2>/dev/null || echo '.claude/settings.local.json' >> .git/info/exclude)`], { timeoutMs: 5000 }) } catch { /* best effort */ }
+  const at = await $.clock.now()
+  if (m) { const next: OrcMission = { ...m, computer: { on: turnOn, at, settingsPath: path }, updatedAt: at }; await update($, missionState, () => next); await persistMission($, next) }
+  await note($, { kind: 'note', agentId: 'owner', text: `orc computer ${turnOn ? 'ON' : 'OFF'}: ${path}` })
+  return turnOn
+    ? `orc computer: set for ${repo}.\n${m ? computerLine(m) : 'computer: no mission yet, so no browser and no network; writes: repo + clones'}\nIt takes effect when the session starts. Restart Claude Code in ${repo} (terminal: quit, then run claude there; Desktop: open a new session in that folder), then type /orc resume to continue inside the computer.\nOff again: /orc computer off. The settings live in ${path} (kept out of git).`
+    : `orc computer: off for ${repo} from the next session (removed the sandbox block from ${path}). Restart, then /orc resume.`
+}
+
 /** The base role of a worker type: orc:builder-web works as orc:builder with a browser. */
 const baseType = (t: string) => t.replace(/-web$/, '')
-/** Did the approved plan grant a browser to this role (builder | verifier)? */
-const browserGranted = (m: OrcMission | null | undefined, role: string) => (m?.understanding?.executionPolicy?.capabilities ?? []).some(c => /browser|chrom|viewport|playwright/i.test(c.need) && new RegExp(role, 'i').test(c.by))
 /** The gate already asked in the dialog, so each gate is asked once: a correction adds a decision, so the redrafted gate
  *  is a new one. */
 let askedGate = ''
@@ -331,6 +399,7 @@ const MAIN_ORCH = 'main'
 /** Edit lock (owner rule 2026-10-06): while a mission runs, the main session may not write into the plugin's own folders,
  *  because a save hot-reloads the plugin mid-mission and drops in-flight state. The owner overrides with /orc allow-edit. */
 let SESSION_ID = ''
+let SESSION_STARTED = 0
 const modRoots = () => [...new Set([PLUGIN_ROOT, ...(LAB ? [SESSION_ID ? `${HOME}/.claude/dev-mods/${SESSION_ID}/orc` : '', `${HOME}/.claude/skills/orc`, `${HOME}/orc-lab/dist/orc`] : [])].filter(Boolean))]
 const WRITE_VERB = /(^|[\s;&|])(>>?|sed\s+-i|cp\s|mv\s|rsync\s|rm\s|tee\s|install\s|touch\s|ln\s|git\s+checkout|open\([^)]*['"]w|\.write\()/
 function modEditViolation(tool: string, args: Record<string, unknown>): string | undefined {
@@ -698,6 +767,7 @@ function renderUnderstanding(m: OrcMission): string {
   if (u.team?.roles?.length) L.push('', '## Team', ...u.team.roles.map(r => `- ${r.id} (${r.kind}): ${r.responsibility} → ${(r.nodeIds ?? []).join(', ')}`))
   const p = u.executionPolicy
   if (p) L.push('', '## Execution policy', `model ${p.model} · max agents ${p.maxAgents} · attempts/node ${p.maxAttemptsPerNode} · max ${p.maxDurationMinutes} min · effects ${(p.allowedEffects ?? []).join(', ')}`, `material change: ${p.materialChangeRule}`)
+  if (p && (u.plan?.nodes ?? []).length) L.push('', '## The computer', computerLine(m), 'Turn it on for this repository with /orc computer on (the sandbox is set when a session starts: restart, then /orc resume).')
   if (p?.capabilities?.length) L.push('', '## Tools and access this work will use (approved at gate 2, tried once at the start)', ...p.capabilities.map(c => `- ${c.need} · ${c.why} · used by ${c.by}${c.permission ? ` · may ask: ${c.permission}` : ''}`))
   if (u.options?.length) L.push('', '## Rules recommended (default · alternatives · why)', ...u.options.map(o => `- ${o.field}: ${o.chosen} · alternatives: ${o.alternatives.join(', ')} · ${o.why}`))
   if (u.executionTarget) L.push('', '## Execution target', `${u.executionTarget.repositoryPath}${u.executionTarget.baseCommit ? ` @ ${u.executionTarget.baseCommit.slice(0, 12)}` : ''}`, `allowed paths: ${u.executionTarget.allowedPaths.join(' ') || '(whole repository)'}`, `required checks: ${(u.executionTarget.requiredCheckIds ?? []).join(', ') || '(none)'}`)
@@ -788,14 +858,16 @@ async function askGate($: EngineInterface) {
   let answer: string
   try {
     const caps = gate === 'permission' ? m.understanding?.executionPolicy?.capabilities ?? [] : []
+    const outside = gate === 'permission' && (await sandboxStatus($, m.repo)) === 'off'
     const question = caps.length ? `It will use: ${caps.map(c => c.need).join('; ')}. ${GATE_QUESTION[gate]}` : GATE_QUESTION[gate]
-    answer = (await $.ui.ask(question, { options: ['Approve', 'Defer'], header: gate === 'understanding' ? 'orc gate 1' : 'orc gate 2' })).trim()
+    answer = (await $.ui.ask(question, { options: outside ? ['Approve', 'Use the computer first', 'Defer'] : ['Approve', 'Defer'], header: gate === 'understanding' ? 'orc gate 1' : 'orc gate 2' })).trim()
   } catch {
     $.ui.status(`gate ${gate === 'understanding' ? 1 : 2} waits for you: the orc pane, or /orc approve · /orc correct <what to change> · /orc defer`)
     return
   }
   const fresh = await read($, missionState)
   if (!fresh || fresh.status !== m.status || fresh.version !== m.version) { $.ui.log('orc: that gate was already decided; the dialog answer was not used.'); return }
+  if (answer === 'Use the computer first') { $.ui.log((await computerSwitch($, true)).replace(/^orc computer:\s*/, '') + ' The gate waits for you there.'); return }
   const text = answer === 'Approve' ? await recordDecision($, gate, 'approve') : answer === 'Defer' ? await recordDecision($, gate, 'defer') : answer ? await recordDecision($, gate, 'correct', answer) : 'orc: empty answer; the gate still waits.'
   $.ui.status(undefined)
   $.ui.log(text.replace(/^orc:\s*/, ''))
@@ -896,7 +968,7 @@ async function launchApprovedMission($: EngineInterface): Promise<string> {
     else {
       let res: { ok?: boolean; tools?: number; width?: number | null; error?: string } = {}
       try {
-        const r = await $.process.run(['node', `${PLUGIN_ROOT}/bin/browser-check.mjs`, JSON.stringify(server)], { timeoutMs: 100000 })
+        const r = await $.process.run(['node', `${PLUGIN_ROOT}/bin/browser-check.mjs`, JSON.stringify(server)], { timeoutMs: 180000 })
         res = JSON.parse(r.stdout.trim().split('\n').pop() ?? '{}')
       } catch (err) { res = { ok: false, error: String(err) } }
       await note($, { kind: 'note', text: `orc computer browser check: ${res.ok ? `ok (${res.tools} tools, ${res.width}px)` : `FAILED: ${short(res.error ?? '', 80)}`}` })
@@ -2482,11 +2554,12 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await loadConfig($)
     try { SESSION_ID = await $.session.id() } catch { SESSION_ID = '' }
+    SESSION_STARTED = await $.clock.now()
     try {
       await $.command.register({
       name: 'orc',
-      description: 'orc: `begin <request>` opens the owner intake (interview → gate 1 understanding → gate 2 plan & rules → run); `approve|correct <note>|defer` answer a pending gate; `resume [repo]` picks a mission up from the repository state; `allow-edit|lock-edit` override/restore the plugin edit lock while a mission runs; `directive <text>` records a standing owner rule; `backlog [add <request>|next]`; `understanding` prints the package; `policy retry=N parallel=N ping=…` tunes a running graph (auto mode); `start <mission.md> [repo=<path>] [amendment=<path>] [final=<path>]` starts a mission from a file; `status`; or the pane / `turns`, `agents`, `journal`, `export`, `clear`',
-      argumentHint: '[begin <request>|approve|correct <note>|defer|resume [repo]|directive <text>|backlog [add|next]|understanding|policy ...|start <mission.md> ...|status|turns|agents|journal|export|clear]',
+      description: 'orc: `begin <request>` opens the owner intake (interview → gate 1 understanding → gate 2 plan & rules → run); `approve|correct <note>|defer` answer a pending gate; `resume [repo]` picks a mission up from the repository state; `allow-edit|lock-edit` override/restore the plugin edit lock while a mission runs; `directive <text>` records a standing owner rule; `backlog [add <request>|next]`; `understanding` prints the package; `policy retry=N parallel=N ping=…` tunes a running graph (auto mode); `computer [on|off]` shows or sets the mission computer (sandbox, browser, network); `start <mission.md> [repo=<path>] [amendment=<path>] [final=<path>]` starts a mission from a file; `status`; or the pane / `turns`, `agents`, `journal`, `export`, `clear`',
+      argumentHint: '[begin <request>|approve|correct <note>|defer|resume [repo]|directive <text>|backlog [add|next]|understanding|policy ...|computer [on|off]|start <mission.md> ...|status|turns|agents|journal|export|clear]',
       })
     } catch (err) {
       // A user skill or another plugin may own /orc; the substrate must still load (tools, agent types, hooks).
@@ -3664,6 +3737,14 @@ export const register: Register = on => {
       await note($, { kind: 'note', agentId: 'owner', text: unlock ? 'edit lock OVERRIDDEN by the owner' : 'edit lock restored' })
       return { text: unlock ? `orc: edit lock overridden for mission v${m.version} by the owner; plugin edits are allowed until the mission settles or /orc lock-edit.` : `orc: edit lock restored for mission v${m.version}.` }
     }
+    if (/^computer\b/.test(argv)) {
+      const sub = argv.replace(/^computer\s*/, '').trim()
+      if (sub === 'on' || sub === 'off') return { text: await computerSwitch($, sub === 'on') }
+      const m = await read($, missionState)
+      const repo = m?.repo ?? (await repoOf($, undefined))
+      const st = await sandboxStatus($, repo)
+      return { text: `orc computer for ${repo}:\n${m ? computerLine(m, st) : `computer: no mission yet · sandbox ${sandboxWords(st)}`}\nThe computer: writes only to the repository and orc's clones; no network except hosts the plan names; a headless browser of its own, given only to the roles gate 2 granted.\n/orc computer on writes the sandbox settings for this repository (a restart steps inside); /orc computer off removes them.` }
+    }
     if (/^resume\b/.test(argv)) return { text: await resumeMission($, argv.replace(/^resume\s*/, '').trim() || undefined) }
     if (/^directive\b/.test(argv)) { const t = argv.replace(/^directive\s*/, '').trim(); return { text: t ? await addDirective($, t) : 'orc directive: usage: /orc directive <text>' } }
     if (/^backlog\b/.test(argv)) {
@@ -3797,6 +3878,7 @@ export const register: Register = on => {
     const usedActs = ACTIVITIES.filter(a => acts[a].count > 0).sort((x, y) => acts[y].ms - acts[x].ms)
 
     const gatePending = !!mis?.understanding && (mis.status === 'understanding_requested' || mis.status === 'permission_requested')
+    const sbStatus = mis?.understanding?.plan?.nodes?.length ? await sandboxStatusCached($, mis.repo) : undefined
     const gateIs1 = mis?.status === 'understanding_requested'
     const gateName = gateIs1 ? 'understanding' : 'permission'
     return (
@@ -3814,6 +3896,7 @@ export const register: Register = on => {
             {!gateIs1 && (mis.understanding.executionPolicy?.capabilities ?? []).length ? (
               <Text color="yellow" wrap="truncate">{`will use: ${(mis.understanding.executionPolicy?.capabilities ?? []).map(c => c.need).join('; ')}`}</Text>
             ) : null}
+            {!gateIs1 && sbStatus ? <Text wrap="truncate">{computerLine(mis, sbStatus)}</Text> : null}
             <Text dimColor wrap="truncate">{`${mis.understanding.finalPicture.criteria.length} criteria · full text: ${mis.dir}/UNDERSTANDING.md`}</Text>
             <Box marginTop={1}>
               <Button key="gate-approve" label="Approve" variant="primary" autoFocus onPress={() => { void recordDecision($, gateName, 'approve') }} />
@@ -3936,6 +4019,7 @@ export const register: Register = on => {
             {mis.status === 'understanding_requested' || mis.status === 'permission_requested' ? (
               <Text color="yellow" wrap="truncate">{'  '}waiting for your decision: see the card at the top</Text>
             ) : null}
+            {sbStatus && !gatePending ? <Text dimColor wrap="truncate">{'  '}{computerLine(mis, sbStatus)}</Text> : null}
             <Text dimColor wrap="truncate">
               {'  '}{mis.dir}/UNDERSTANDING.md{' · /orc understanding · approve | correct <note> | defer · resume · directive · backlog'}
             </Text>
