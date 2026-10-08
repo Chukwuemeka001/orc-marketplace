@@ -1,6 +1,6 @@
 {
   "name": "orc",
-  "version": "0.19.0",
+  "version": "0.19.1",
   "description": "Orchestrate a project inside Claude Code: an interview and two approval gates, then builders in their own clones of your repo, a check on every return, independent verifiers, merge only on acceptance. Optional auto mode runs the approved plan as a graph by rule.",
   "types": "./types/index.d.ts",
   "author": {

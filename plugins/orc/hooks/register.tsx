@@ -442,8 +442,8 @@ function orchestratorPrompt(mission: string, repo: string, amendment: string | u
   return `You are the orchestrator for the mission in ${mission}. Read it first, whole.
 
 Working rules
-- Repository: ${repo} (create it with git init if it does not exist; commit the scaffold, ops/CONTRACTS.md and the work orders BEFORE dispatching any builder, because each builder's clone is cut from the repository's HEAD). Write interfaces between builders into ${repo}/ops/CONTRACTS.md before dispatch; every work order points at it.
-- Delegate the building. Spawn builders with the Agent tool as subagent_type "orc:builder" (never other types; never set a model). Verifiers and the integrator are dispatched by the substrate, never by you.
+- Repository: ${repo} (orc has already run git init if it did not exist; commit the scaffold, ops/CONTRACTS.md and the work orders BEFORE dispatching any builder, because each builder's clone is cut from the repository's HEAD). Write interfaces between builders into ${repo}/ops/CONTRACTS.md before dispatch; every work order points at it.
+- Delegate the building. Spawn builders with the Agent tool as subagent_type "orc:builder" (or "orc:builder-web" for a step the approved plan gives a browser; never other types; never set a model). Verifiers and the integrator are dispatched by the substrate, never by you.
 - DISPATCH IN THE BACKGROUND: every Agent call uses run_in_background true. Never poll, sleep or wait for a child. After dispatching, END YOUR TURN. You are woken each time a child finishes, with the registered check's result and the child's report. On wake, act on that evidence (mark it), then dispatch the next work or finish. While children run, write the next work orders. At most 3 children at a time.
 - Each builder gets one written work order under ${repo}/ops/work-orders/<id>.md: objective, done_means (runnable), may_change (paths), must_not, what to report (the builder's fixed shape: STATUS / CHANGED / CHECKED / NOT CHECKED / DEVIATIONS). Point the builder at the file.
 - REGISTERED CHECKS: each builder's Agent prompt carries exactly "CHECK: <shell command>" and "CHECK_CWD: ${repo}" (optionally "CHECK_TIMEOUT: <seconds>"). The substrate runs the check on return and your wake carries pass/fail/unavailable with the output tail. Do not re-run it yourself before marking; run things only when the result is unavailable or inconclusive, and say so in the mark note.
@@ -798,7 +798,7 @@ async function askGate($: EngineInterface) {
   if (!fresh || fresh.status !== m.status || fresh.version !== m.version) { $.ui.log('orc: that gate was already decided; the dialog answer was not used.'); return }
   const text = answer === 'Approve' ? await recordDecision($, gate, 'approve') : answer === 'Defer' ? await recordDecision($, gate, 'defer') : answer ? await recordDecision($, gate, 'correct', answer) : 'orc: empty answer; the gate still waits.'
   $.ui.status(undefined)
-  $.ui.log(text)
+  $.ui.log(text.replace(/^orc:\s*/, ''))
 }
 
 async function recordDecision($: EngineInterface, gate: 'understanding' | 'permission', choice: 'approve' | 'correct' | 'defer', noteText?: string): Promise<string> {
@@ -851,6 +851,12 @@ async function launchApprovedMission($: EngineInterface): Promise<string> {
     await $.process.run(['/bin/sh', '-c', cmd], { timeoutMs: 60000 })
     try { await $.process.run(['/bin/sh', '-c', `rm -rf "${m.repo}-wt" && git -C "${m.repo}" worktree prune`], { timeoutMs: 30000 }) } catch { /* best effort */ }
   }
+  // orc creates the repository itself: its own commands run outside Claude Code's sandbox, which (rightly) refuses a
+  // sandboxed `git init` (.git/config and .git/hooks are protected). Commits after that are fine inside the sandbox.
+  try {
+    const inside = await $.process.run(['git', '-C', m.repo, 'rev-parse', '--git-dir'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1 }))
+    if (inside.exitCode !== 0) await $.process.run(['/bin/sh', '-c', `mkdir -p "${m.repo}" && git -C "${m.repo}" init -q`], { timeoutMs: 15000 })
+  } catch (err) { $.ui.log(`orc: git init of ${m.repo} failed: ${String(err)}`, { to: 'debug' }) }
   const missionPath = `${dir}/MISSION.md`
   await $.fs.write(missionPath, missionFileFrom(m))
   const at = await $.clock.now()
@@ -3030,7 +3036,7 @@ export const register: Register = on => {
     let spawnNow = ''
     if (orch.id === MAIN_ORCH) {
       await inboxMarkDelivered($, [item.id], 'tool-result')
-      spawnNow = ` SPAWN NOW, in this turn (inbox ${item.id}): Agent tool, subagent_type "orc:verifier", description "${description}", run_in_background true, prompt = the full contents of ${item.spawn!.path} (read the file first). Spawn it once, then continue; its report arrives as a wake.`
+      spawnNow = ` SPAWN NOW, in this turn (inbox ${item.id}): Agent tool, subagent_type "${item.spawn!.type}", description "${description}", run_in_background true, prompt = the full contents of ${item.spawn!.path} (read the file first). Spawn it once, then continue; its report arrives as a wake.`
     }
     await patchAgent($, orch.id, a => ({ ...a, verifyRequests: [...(a.verifyRequests ?? []), { id, stage, at, repo, snapshot: snap?.path }] }))
     await note($, { kind: 'spawn', agentId: orch.id, text: `request_verification ${stage} → ${id}${snap ? ` @ ${snap.sha.slice(0, 7)}` : ' (no snapshot)'}` })
