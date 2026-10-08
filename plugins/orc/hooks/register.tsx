@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import { ownReadRoot } from './policy'
+import { ownReadRoot, shellMask, sweepsStage } from './policy'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { OrcActivity, OrcAgent, OrcBucket, OrcClass, OrcCompaction, OrcDemo, OrcEntry, OrcGraph, OrcGraphNode, OrcInboxItem, OrcMission, OrcTurn, OrcUnderstanding } from '../types'
@@ -351,13 +351,13 @@ async function notifyOrch($: EngineInterface, orchId: string, text: string) {
   await $.session.send({ to: orchId, text })
 }
 
-const VERIFIER_BRIEF = (stage: 'checkpoint' | 'final', repo: string, mission: string, amendment: string, finalPath: string, snap?: { path: string; sha: string }) =>
+const VERIFIER_BRIEF = (stage: 'checkpoint' | 'final', repo: string, mission: string, amendment: string, finalPath: string, snap?: { path: string; sha: string }, scopeNote?: string) =>
   `You are an independent verifier dispatched by the substrate at the ${stage} of the mission in ${snap && mission.startsWith(`${repo}/`) ? `${snap.path}/${mission.slice(repo.length + 1)}` : mission}. Repository: ${repo}. ` +
   (snap
     ? `Check the SNAPSHOT at ${snap.path}: a detached copy of the repository at commit ${snap.sha.slice(0, 12)}, cut when verification was requested. Run everything there (cd into it); never read, run or write in ${repo} itself, which other agents may change while you work. `
     : `No snapshot could be cut, so check ${repo} as it is now; if git status shows files changing under you, say so in the report. `) +
   (stage === 'checkpoint'
-    ? `Check every mission "Done means" item by running things (tests, CLI, real inputs named in the mission, the golden check), EXCEPT the orchestrator's final report: it is written at the end, so mark that item "not applicable at checkpoint", never FAIL. `
+    ? `A checkpoint checks work done so far, not the finished mission. Its scope is the newest ops/CHECKPOINT-*.md in ${snap ? 'the snapshot' : 'the repository'}${scopeNote ? `, and the orchestrator's note: "${scopeNote.replace(/"/g, "'")}"` : ''}. Check every mission "Done means" item that scope names by running things (tests, CLI, real inputs named in the mission, the golden check). An item outside the scope, work the scope says is still being built, and the orchestrator's final report are NOT IN SCOPE: list them under NOT CHECKED, never FAIL. With no scope file and no note, check every "Done means" item except the final report. `
     : `Check every mission "Done means" item${amendment && amendment !== '(none)' ? ` AND every item of the amendment in ${amendment}` : ''}, by running things. The orchestrator's final report (${snap && finalPath.startsWith(`${repo}/`) ? `${snap.path}/${finalPath.slice(repo.length + 1)}` : finalPath}) is committed as a draft whose STATUS line reads PENDING until a final verification passes: check that it has the sections the mission asks for and that its claims match the repository; a PENDING status is expected, not a failure. `) +
   `Rules: read-only, change nothing in the repository; write scratch files only under your own temp directory; never read any directory under ${repo.replace(/\/[^/]+\/?$/, '')} whose name starts with hidden, and never write inside a corpus or fixture directory the mission names as read-only; the machine may be loaded, so skip inputs over 100 MB and run any performance test once, reporting the measured time together with the 1-minute load average and core count (sysctl -n vm.loadavg / hw.ncpu, or /proc/loadavg / nproc); a timing miss while the load exceeds the core count is "UNMEASURED under load", not FAIL; finish within about 8 minutes. Report in exactly this shape, at most 40 lines: VERDICT: PASS|FAIL (one line, naming the commit checked). CRITERIA: one line per criterion, "PASS|FAIL|N/A <n> <criterion> — <command> → <evidence in a few words>". DEFECTS: most serious first, at most 5, one line each with command and evidence, or none. NOT CHECKED: at most 5 lines. Nothing else.`
 
@@ -437,7 +437,7 @@ Working rules
 - REGISTERED CHECKS: each builder's Agent prompt carries exactly "CHECK: <shell command>" and "CHECK_CWD: ${repo}" (optionally "CHECK_TIMEOUT: <seconds>"). The substrate runs the check on return and your wake carries pass/fail/unavailable with the output tail. Do not re-run it yourself before marking; run things only when the result is unavailable or inconclusive, and say so in the mark note.
 - WRITE BOUNDARY AND CLONES: each builder's prompt carries exactly "MAY_CHANGE: <space-separated repo-relative paths>". The substrate cuts the builder its own clone (git worktree) from HEAD; it edits, tests and commits there, staging by name. Edit/Write and git staging outside MAY_CHANGE are denied; shell writes are audited. When you mark a builder accepted, its branch is merged (MERGED / NOTHING TO MERGE / CONFLICT with the repository left unchanged; on a conflict, a fix packet cut from HEAD or reject). Your own commits touch ops/ only, by name; sweeping adds and commit -a are denied for you.
 - DISPATCH PREFLIGHT: the substrate checks each dispatch mechanically and appends its findings to the builder's prompt; a hard finding is sent to you at once.
-- VERIFICATION: the first four lines of ${repo}/ops/DECISIONS.md must be exactly "REPO: ${repo}", "MISSION: ${mission}", "AMENDMENT: ${amendment ?? '(none)'}", "FINAL: ${finalPath}". Verifiers check a snapshot of the repository's HEAD, so COMMIT everything you want verified before you request it. When the first integrated version exists, write ${repo}/ops/CHECKPOINT-1.md, commit it, and call mcp__orc__request_verification {stage: "checkpoint"}. When the amendment (if any) is done and its checks pass, write ${finalPath} as a draft whose status line reads "STATUS: PENDING final verification", commit it, then call {stage: "final"}; after fixing anything a final verifier failed, update the draft, commit, and call {stage: "final"} again. Receipts are not verdicts; reports arrive as wakes. Mark verifiers like any other child. Do not change the status line from PENDING until a final verification has passed or you have recorded why you are stopping.
+- VERIFICATION: the first four lines of ${repo}/ops/DECISIONS.md must be exactly "REPO: ${repo}", "MISSION: ${mission}", "AMENDMENT: ${amendment ?? '(none)'}", "FINAL: ${finalPath}". Verifiers check a snapshot of the repository's HEAD, so COMMIT everything you want verified before you request it. When the first integrated version exists, write ${repo}/ops/CHECKPOINT-1.md naming what the checkpoint covers and what is still being built (the verifier checks only what it covers), commit it, and call mcp__orc__request_verification {stage: "checkpoint"}. When the amendment (if any) is done and its checks pass, write ${finalPath} as a draft whose status line reads "STATUS: PENDING final verification", commit it, then call {stage: "final"}; after fixing anything a final verifier failed, update the draft, commit, and call {stage: "final"} again. Receipts are not verdicts; reports arrive as wakes. Mark verifiers like any other child. Do not change the status line from PENDING until a final verification has passed or you have recorded why you are stopping.
 - DELTA LEDGER: you keep no status file. Each wake tells you what changed and what is actionable, and separates what the substrate PROVED (the registered check it ran, the boundary audit, the merge) from what the child CLAIMED: never re-run the registered check; spot-check only claims the check does not cover, and say in the mark note what you ran. The full ledger is in a file named in every wake, for context loss only. Record verdicts with mcp__orc__mark {taskId, verdict: accepted|rejected|redo, note}. Keep ${repo}/ops/DECISIONS.md (numbered, append-only). Call mcp__orc__status when you need the current state without a wake.
 - INTEGRATION: after your first accepted merge the substrate dispatches an integrator that writes ${repo}/ops/integration/check.sh; the substrate runs it after every merge; a FAIL wakes you; a PASS rides your next wake, or wakes you when nothing else is running. Request an integration pass with mcp__orc__request_verification {stage: "integration"} after the amendment lands.
 - ${forbidden ? `${forbidden} ` : ''}Never read any directory whose name starts with "hidden" (an owner's acceptance suite may live there). Never write outside ${repo} except the final report and scratch under your own temp directory.
@@ -2041,13 +2041,13 @@ function boundaryCheck(tool: string, args: Record<string, unknown>, b: { root: s
   }
   if (tool !== 'Bash') return undefined
   const full = typeof args.command === 'string' ? args.command : ''
-  const cmd = full.split(/<<-?\s*['"]?\w+['"]?/)[0] ?? full
-  if (/\bgit\s+(add|stage)\b[^;&|\n]*(\s-A\b|\s--all\b|\s\.(\s|$))/m.test(cmd) || /\bgit\s+commit\b[^;&|\n]*\s(-a|--all|-am)\b/m.test(cmd)) {
+  const { code, masked } = shellMask(full)
+  if (sweepsStage(full)) {
     return { target: 'git add -A / commit -a', reason: `orc boundary: stage paths explicitly; -A, --all, "." and commit -a are denied (your may_change: ${allowText}).` }
   }
-  const gitAdd = /\bgit\s+(?:add|stage)\s+([^;&|\n]+)/.exec(cmd)
-  if (gitAdd) {
-    for (const tok of shellWords(gitAdd[1]!).map(w => w.text).filter(t => t && !t.startsWith('-') && !t.startsWith('$'))) {
+  const gitAdd = /\bgit\s+(?:add|stage)\s+([^;&|\n]+)/d.exec(masked)
+  if (gitAdd?.indices?.[1]) {
+    for (const tok of shellWords(code.slice(gitAdd.indices[1][0], gitAdd.indices[1][1])).map(w => w.text).filter(t => t && !t.startsWith('-') && !t.startsWith('$'))) {
       const abs = normPath(tok, b.root)
       if (!inBoundary(abs, b) && !isAncestorOfAllowed(abs, b)) return { target: abs, reason: `orc boundary: git add ${tok} is outside your may_change (${allowText}).` }
     }
@@ -2135,8 +2135,7 @@ async function dispatchPreflight($: EngineInterface, prompt: string, boundary: {
 
 /** Orchestrator-side commit scope: no sweeping stages. */
 function orchestratorCommitCheck(args: Record<string, unknown>): string | undefined {
-  const cmd = typeof args.command === 'string' ? args.command.split(/<<-?\s*['"]?\w+['"]?/)[0] ?? '' : ''
-  if (/\bgit\s+(add|stage)\b[^;&|\n]*(\s-A\b|\s--all\b|\s\.(\s|$))/m.test(cmd) || /\bgit\s+commit\b[^;&|\n]*\s(-a|--all|-am)\b/m.test(cmd)) {
+  if (typeof args.command === 'string' && sweepsStage(args.command)) {
     return 'orc boundary: name the paths you stage; "git add -A", "git add .", "--all" and "git commit -a" are denied for the orchestrator (they sweep builders\' unfinished files).'
   }
   return undefined
@@ -2961,7 +2960,7 @@ export const register: Register = on => {
     }
     const description = `auto verifier: ${stage} [for ${orch.id.slice(0, 7)}]`
     const snap = await makeSnapshot($, repo, stage)
-    const item = await relayViaMain($, 'spawn-verifier', { description, prompt: VERIFIER_BRIEF(stage, repo, mission, amendment || '(none)', finalPath, snap) })
+    const item = await relayViaMain($, 'spawn-verifier', { description, prompt: VERIFIER_BRIEF(stage, repo, mission, amendment || '(none)', finalPath, snap, stage === 'checkpoint' && typeof input.note === 'string' ? short(input.note.trim(), 400) : undefined) })
     let spawnNow = ''
     if (orch.id === MAIN_ORCH) {
       await inboxMarkDelivered($, [item.id], 'tool-result')

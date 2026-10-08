@@ -1,6 +1,6 @@
 // Smoke tests for what a stranger meets first. Run: claude plugin test <plugin-dir>
 import { test, expect, describe } from 'claude-code/testing'
-import { ownReadRoot } from '../hooks/policy'
+import { ownReadRoot, sweepsStage, shellMask } from '../hooks/policy'
 
 describe('outside the lab', () => {
   test('/orc demo is a lab feature', async ($) => {
@@ -53,5 +53,28 @@ describe('everything else stays with Claude Code', () => {
   })
   test('a relative path', async () => {
     expect(ownReadRoot('Read', { file_path: 'app-wt/x' }, running, out, '/home/u')).toBeUndefined()
+  })
+})
+
+describe('the sweep guard reads commands, not quoted text', () => {
+  test('real sweeping stages are caught', async () => {
+    expect(sweepsStage('git add -A')).toBe(true)
+    expect(sweepsStage('cd repo && git add . && git commit -m x')).toBe(true)
+    expect(sweepsStage('git commit -am "msg"')).toBe(true)
+    expect(sweepsStage("cat > f <<'EOF'\nhello\nEOF\ngit add -A")).toBe(true)
+  })
+  test('naming paths is fine', async () => {
+    expect(sweepsStage('git add ops/CONTRACTS.md && git commit -m "ops: contracts"')).toBe(false)
+  })
+  test('a work order that quotes the forbidden flags is text (Desktop run 2026-10-08)', async () => {
+    expect(sweepsStage("MUST='## Must not\n- never run `git add -A` or `git commit -a`'\nprintf '%s' \"$MUST\" > ops/work-orders/n1.md")).toBe(false)
+    expect(sweepsStage("cat > ops/work-orders/n1.md <<'EOF'\nNever git add -A.\nEOF")).toBe(false)
+    expect(sweepsStage('git commit -m "explain why -a is denied"')).toBe(false)
+    expect(sweepsStage('echo "use git add . carefully"')).toBe(false)
+  })
+  test('masking keeps positions', async () => {
+    const { code, masked } = shellMask('git add "my file.txt" b.txt')
+    expect(masked.length).toBe(code.length)
+    expect(code.slice(8, 21)).toBe('"my file.txt"')
   })
 })

@@ -11,3 +11,18 @@ export function ownReadRoot(tool: string, input: { file_path?: unknown; path?: u
   const roots = [outDir, `${mission.repo.replace(/\/+$/, '')}-wt`].filter(r => r.startsWith('/') && r.length > 1)
   return roots.find(r => target === r || target.startsWith(`${r}/`))
 }
+
+/** A shell command as code: heredoc bodies dropped (their `<<` line kept) and quoted text masked at the same length,
+ *  so positions in `masked` still index `code`. A work order that merely quotes "git add -A" is text, not a command
+ *  (Desktop run 2026-10-08: such a heredoc-free quoted string was denied), and a command after a heredoc is still seen. */
+export function shellMask(cmd: string): { code: string; masked: string } {
+  const code = cmd.replace(/<<-?[ \t]*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g, m => m.slice(0, m.indexOf('\n')))
+  const masked = code.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, m => m[0] + '_'.repeat(Math.max(0, m.length - 2)) + m[m.length - 1])
+  return { code, masked }
+}
+
+/** Sweeping stages ("git add -A", "git add .", "--all", "git commit -a") in a command's code, not its quoted text. */
+export function sweepsStage(cmd: string): boolean {
+  const { masked } = shellMask(cmd)
+  return /\bgit\s+(add|stage)\b[^;&|\n]*(\s-A\b|\s--all\b|\s\.(\s|$))/m.test(masked) || /\bgit\s+commit\b[^;&|\n]*\s(-a|--all|-am)\b/m.test(masked)
+}
