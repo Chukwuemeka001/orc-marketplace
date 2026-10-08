@@ -19,7 +19,7 @@ let DEFAULT_REPO = ''
 let CHECK_TIMEOUT_MS = 300000
 let LIVENESS_MINUTES = 12
 let SCRATCH_PREFIXES: string[] = ['/private/tmp/', '/tmp/', '/var/folders/', '/dev/null']
-type OrcConfig = { lab?: boolean; workersReadClaudeMd?: boolean; outDir?: string; model?: string | null; effort?: 'low' | 'medium' | 'high' | null; defaultRepo?: string; checkTimeoutMs?: number; livenessMinutes?: number; scratchPrefixes?: string[]; labCompactAt?: number | null; labMaxCompactions?: number; workbenchDir?: string; labInjectVerifierDefect?: string | null }
+type OrcConfig = { lab?: boolean; workersReadClaudeMd?: boolean; gateDialog?: boolean; outDir?: string; model?: string | null; effort?: 'low' | 'medium' | 'high' | null; defaultRepo?: string; checkTimeoutMs?: number; livenessMinutes?: number; scratchPrefixes?: string[]; labCompactAt?: number | null; labMaxCompactions?: number; workbenchDir?: string; labInjectVerifierDefect?: string | null }
 async function loadConfig($: EngineInterface): Promise<OrcConfig> {
   let configDir = ''
   try {
@@ -44,6 +44,7 @@ async function loadConfig($: EngineInterface): Promise<OrcConfig> {
   WORKBENCH_DIR = typeof cfg.workbenchDir === 'string' ? cfg.workbenchDir : ''
   LAB = cfg.lab === true
   WORKERS_READ_CLAUDE_MD = cfg.workersReadClaudeMd !== false
+  GATE_DIALOG = cfg.gateDialog !== false
   LAB_INJECT_DEFECT = typeof cfg.labInjectVerifierDefect === 'string' ? cfg.labInjectVerifierDefect : ''
   DEFAULT_REPO = (cfg.defaultRepo ?? HOME).replace(/^~/, HOME)
   if (cfg.checkTimeoutMs) CHECK_TIMEOUT_MS = cfg.checkTimeoutMs
@@ -67,6 +68,13 @@ let LAB = false
 /** Workers read the project's CLAUDE.md like any Claude Code agent (config "workersReadClaudeMd": false strips them,
  *  as the lab's measurements did). */
 let WORKERS_READ_CLAUDE_MD = true
+/** A pending gate is also asked in Claude Code's own question dialog (config "gateDialog": false keeps it to the pane and
+ *  the commands). Owner, 2026-10-08: in the Desktop app the gate row "blended in so much" that he missed it. */
+let GATE_DIALOG = true
+/** The gate already asked in the dialog, so each gate is asked once: a correction adds a decision, so the redrafted gate
+ *  is a new one. */
+let askedGate = ''
+const gateKey = (m: OrcMission) => `${m.status}·${m.version}·${m.decisions.length}`
 let LAB_EFFORT: 'low' | 'medium' | 'high' | null = null
 let LAB_MODEL: string | null = null
 const ORCHESTRATOR_PROMPT = `You are an orchestrator. You run a mission by reading it, deciding, delegating work to builder agents, verifying what comes back by running things yourself, and keeping a written record. You do not write product code yourself except to unblock integration when a builder has failed twice on the same piece.
@@ -739,6 +747,34 @@ async function ownerContext($: EngineInterface, repo: string): Promise<string> {
     '', 'PACKAGE SHAPE (JSON for mcp__orc__draft_understanding.understanding): { mission: { statement, deliverables[] }, finalPicture: { summary, criteria: [{ id?, description }], constraints[], exclusions[] }, plan: { nodes: [{ id?, objective, acceptanceChecks[], dependsOn[], criterionIds[], resourceKeys?[], testPaths?[], fixesChecks?[] }], testDirs?[] }, team: { roles: [{ id?, kind: producer|reviewer, responsibility, nodeIds[] }] }, executionPolicy: { model, maxAgents, maxAttemptsPerNode, maxDurationMinutes, maxExternalSpendMicros?, allowedEffects[], materialChangeRule }, executionTarget: { kind: "git_repository", repositoryPath, baseCommit?, allowedPaths[], requiredCheckIds?[] }, sourceEvidence: { originalRequest, items: [{ id?, text, classification, role, source }], coverage: [{ itemId, field, target }] }, openQuestions[] }',
   ]
   return lines.join('\n')
+}
+
+const GATE_QUESTION = {
+  understanding: 'Approve this understanding, defer it, or type what to change under Other. Is this what you mean?',
+  permission: 'Approving starts the work. Defer, or type what to change under Other. Approve this plan and these rules?',
+} as const
+
+/** Ask a pending gate in Claude Code's own question dialog, once, when the session is idle. The answer goes through the
+ *  same path as /orc approve|correct|defer; a gate decided meanwhile (pane, command) makes a late answer a no-op. */
+async function askGate($: EngineInterface) {
+  const m = await read($, missionState)
+  if (!m || (m.status !== 'understanding_requested' && m.status !== 'permission_requested')) return
+  const gate = m.status === 'understanding_requested' ? 'understanding' : 'permission'
+  const key = gateKey(m)
+  if (askedGate === key) return
+  askedGate = key
+  let answer: string
+  try {
+    answer = (await $.ui.ask(GATE_QUESTION[gate], { options: ['Approve', 'Defer'], header: gate === 'understanding' ? 'orc gate 1' : 'orc gate 2' })).trim()
+  } catch {
+    $.ui.status(`orc: gate ${gate === 'understanding' ? 1 : 2} waits for you: the orc pane, or /orc approve · /orc correct <what to change> · /orc defer`)
+    return
+  }
+  const fresh = await read($, missionState)
+  if (!fresh || fresh.status !== m.status || fresh.version !== m.version) { $.ui.log('orc: that gate was already decided; the dialog answer was not used.'); return }
+  const text = answer === 'Approve' ? await recordDecision($, gate, 'approve') : answer === 'Defer' ? await recordDecision($, gate, 'defer') : answer ? await recordDecision($, gate, 'correct', answer) : 'orc: empty answer; the gate still waits.'
+  $.ui.status(undefined)
+  $.ui.log(text)
 }
 
 async function recordDecision($: EngineInterface, gate: 'understanding' | 'permission', choice: 'approve' | 'correct' | 'defer', noteText?: string): Promise<string> {
@@ -2519,6 +2555,12 @@ export const register: Register = on => {
       if (inboxList.some(i => !i.ackedAt && i.delivered.length === 0 && nowTick - i.at > 1500)) {
         try { await inboxDeliverIfIdle($, 'tick') } catch (err) { $.ui.log(`orc: inbox delivery failed: ${String(err)}`, { to: 'debug' }) }
       }
+      // A gate that waits for the owner is asked in the question dialog once the session is idle (not mid-turn, no
+      // inbox item still going out).
+      if (GATE_DIALOG && !open && !inboxOpen) {
+        const mg = await read($, missionState)
+        if (mg && (mg.status === 'understanding_requested' || mg.status === 'permission_requested') && askedGate !== gateKey(mg)) void askGate($)
+      }
       if (running.length === 0 && !open && !inboxOpen && !hasStranded && !hasDue) return
       if (hasDue && ticks % 5 === 0) {
         try {
@@ -2967,7 +3009,7 @@ export const register: Register = on => {
     const next: OrcMission = { ...m, status: 'understanding_requested', updatedAt: at }
     await update($, missionState, () => next); await persistMission($, next)
     openPane($)
-    $.ui.toast('orc: an understanding awaits your decision (Pane)')
+    $.ui.toast('orc: your approval is needed (gate 1: is this what you mean?)', { timeoutMs: 15000 })
     return { result: `orc: understanding v${m.version} presented to the owner in the /orc pane (Approve / Correct / Defer; or /orc approve, /orc correct <note>, /orc defer). Wait for the owner; their decision arrives as a prompt. Do not request again.` }
   })
 
@@ -2982,7 +3024,7 @@ export const register: Register = on => {
     const next: OrcMission = { ...m, status: 'permission_requested', updatedAt: at }
     await update($, missionState, () => next); await persistMission($, next)
     openPane($)
-    $.ui.toast('orc: work permission awaits your decision (Pane)')
+    $.ui.toast('orc: your approval is needed (gate 2: the plan and its rules)', { timeoutMs: 15000 })
     const p = m.understanding.executionPolicy; const t = m.understanding.executionTarget
     return { result: `orc: plan & rules v${m.version} presented to the owner (gate 2): ${m.understanding.plan.nodes.length} nodes, ${p.maxAgents} agents max, ${p.maxAttemptsPerNode} attempts/node, ${p.maxDurationMinutes} min, effects ${p.allowedEffects.join(', ')}, paths ${t?.allowedPaths.join(' ') || '(whole repository)'}, repository ${m.repo}. Wait for the owner; approval starts the mission by itself.` }
   })
@@ -3634,8 +3676,32 @@ export const register: Register = on => {
     const acts = sumActivities(all)
     const usedActs = ACTIVITIES.filter(a => acts[a].count > 0).sort((x, y) => acts[y].ms - acts[x].ms)
 
+    const gatePending = !!mis?.understanding && (mis.status === 'understanding_requested' || mis.status === 'permission_requested')
+    const gateIs1 = mis?.status === 'understanding_requested'
+    const gateName = gateIs1 ? 'understanding' : 'permission'
     return (
       <Box flexDirection="column">
+        {gatePending && mis?.understanding ? (
+          <Box key="gate" flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1} marginBottom={1}>
+            <Text bold color="black" backgroundColor="yellow">{` ACTION NEEDED · ${gateIs1 ? 'GATE 1 of 2' : 'GATE 2 of 2'} `}</Text>
+            <Text bold>{gateIs1 ? 'Is this what you mean?' : 'Approve this plan and these rules? Approving starts the work.'}</Text>
+            <Text wrap="truncate">{short(mis.understanding.mission.statement || '(no statement yet)', width - 6)}</Text>
+            {gateIs1 ? (
+              <Text dimColor wrap="truncate">{`you said: ${short(mis.understanding.sourceEvidence.originalRequest, width - 16)}`}</Text>
+            ) : (
+              <Text dimColor wrap="truncate">{`plan: ${(mis.understanding.plan?.nodes ?? []).length} steps · ${mis.understanding.executionPolicy?.maxAgents ?? '?'} agents at most · ${mis.understanding.executionPolicy?.maxDurationMinutes ?? '?'} min · mode ${mis.understanding.executionPolicy?.mode ?? 'normal'}`}</Text>
+            )}
+            <Text dimColor wrap="truncate">{`${mis.understanding.finalPicture.criteria.length} criteria · full text: ${mis.dir}/UNDERSTANDING.md`}</Text>
+            <Box marginTop={1}>
+              <Button key="gate-approve" label="Approve" variant="primary" autoFocus onPress={() => { void recordDecision($, gateName, 'approve') }} />
+              <Text> </Text>
+              <Button key="gate-correct" label="Correct" variant="secondary" onPress={() => { void recordDecision($, gateName, 'correct', 'corrections follow in chat') }} />
+              <Text> </Text>
+              <Button key="gate-defer" label="Defer" variant="secondary" onPress={() => { void recordDecision($, gateName, 'defer') }} />
+            </Box>
+            <Text dimColor>or type /orc approve · /orc correct {'<what to change>'} · /orc defer</Text>
+          </Box>
+        ) : null}
         <Text bold>
           Orchestrator effort · {focusLabel} · session {clock(sessionWall)}, {all.length} turns
         </Text>
@@ -3745,14 +3811,7 @@ export const register: Register = on => {
               </Box>
             ) : null}
             {mis.status === 'understanding_requested' || mis.status === 'permission_requested' ? (
-              <Box>
-                <Text>{'  '}{mis.status === 'understanding_requested' ? 'Gate 1 · Is this what you mean?' : 'Gate 2 · Approve this plan and these rules?'}{' '}</Text>
-                <Button key="approve" label="Approve" onPress={() => { void recordDecision($, mis.status === 'permission_requested' ? 'permission' : 'understanding', 'approve') }} />
-                <Text> </Text>
-                <Button key="correct" label="Correct" onPress={() => { void recordDecision($, mis.status === 'permission_requested' ? 'permission' : 'understanding', 'correct', 'corrections follow in chat') }} />
-                <Text> </Text>
-                <Button key="defer" label="Defer" onPress={() => { void recordDecision($, mis.status === 'permission_requested' ? 'permission' : 'understanding', 'defer') }} />
-              </Box>
+              <Text color="yellow" wrap="truncate">{'  '}waiting for your decision: see the card at the top</Text>
             ) : null}
             <Text dimColor wrap="truncate">
               {'  '}{mis.dir}/UNDERSTANDING.md{' · /orc understanding · approve | correct <note> | defer · resume · directive · backlog'}
@@ -3790,8 +3849,12 @@ export const register: Register = on => {
     const inboxOpen = ((await read($, inboxState)) ?? []).filter(i => !i.ackedAt).length
     return (
       <Box>
+        {pending ? (
+          <Text bold color="black" backgroundColor="yellow">{` orc: your approval is needed · ${mis!.status === 'understanding_requested' ? 'gate 1 of 2' : 'gate 2 of 2'} `}</Text>
+        ) : null}
+        {pending ? <Text> </Text> : null}
         <Text dimColor wrap="truncate">
-          {inboxOpen ? `orc: inbox ${inboxOpen} awaiting action → ` : ''}{pending ? `orc: ${mis!.status === 'understanding_requested' ? 'GATE 1 (is this what you mean?)' : 'GATE 2 (plan & rules)'} awaits your decision → ` : ''}orc t{focus.n}
+          {inboxOpen ? `orc: inbox ${inboxOpen} awaiting action → ` : ''}orc t{focus.n}
           {open ? '·live' : ''} · model {clock(focus.modelMs)} · tools {clock(tm)}/{toolCount(focus)}
           {top.length ? ` (${top.map(c => `${c.slice(0, 3)} ${pct(focus.classes[c]?.ms ?? 0, tm)}`).join(' ')})` : ''} · ctx {k(focus.contextTokens)}
           {running ? ` · ${running} agents` : ''}{' '}
