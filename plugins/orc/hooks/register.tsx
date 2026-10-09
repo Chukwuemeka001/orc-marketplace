@@ -755,7 +755,12 @@ function validateUnderstanding(u: OrcUnderstanding, stage: 1 | 2 = 2): string[] 
 
 function renderUnderstanding(m: OrcMission): string {
   const u = m.understanding
-  if (!u) return `# Understanding (v${m.version})\n\nSTATUS: ${m.status}\n\n(no package drafted yet)\n`
+  if (!u) {
+    const L0 = [`# Understanding (v${m.version})`, '', `STATUS: ${m.status}`, '', m.missionFile ? `Mission file: ${m.missionFile} (started with /orc start; no interview package)` : '(no package drafted yet)']
+    if (m.directives?.length) L0.push('', '## Owner directives', ...m.directives.map(d => `- ${iso(d.at)} ${d.text}`))
+    if (m.continuations?.length) L0.push('', '## Continuations (the owner continued the finished mission; each is the amendment and the approval of its version)', ...m.continuations.map(c => `- v${c.version} ${iso(c.at)} (previous final: ${c.previousFinal ?? 'none'}): ${short(c.request, 160)}`))
+    return L0.join('\n') + '\n'
+  }
   const L: string[] = [`# Understanding v${m.version} — ${m.status}`, '', `Repository: ${m.repo}`, '', '## Mission', u.mission.statement, '', '### Deliverables', ...u.mission.deliverables.map((d, i) => `${i}. ${d}`), '', '## Final picture', u.finalPicture.summary, '', '### Criteria']
   for (const c of u.finalPicture.criteria) L.push(`- ${c.id}: ${c.description}`)
   L.push('', '### Constraints', ...(u.finalPicture.constraints.length ? u.finalPicture.constraints.map((x, i) => `${i}. ${x}`) : ['(none)']), '', '### Exclusions', ...(u.finalPicture.exclusions.length ? u.finalPicture.exclusions.map((x, i) => `${i}. ${x}`) : ['(none)']))
