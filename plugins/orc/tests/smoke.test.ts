@@ -132,7 +132,8 @@ describe('continuing a finished mission (/orc continue)', () => {
   })
   test('intake first, and a subagent-run mission goes through /orc start', async () => {
     expect(continueRefusal({ ...done, status: 'permission_requested' }, 'more')).toContain('intake')
-    expect(continueRefusal({ ...done, understanding: undefined }, 'more')).toContain('no approved understanding')
+    expect(continueRefusal({ ...done, understanding: undefined }, 'more')).toContain('neither an approved understanding nor a mission file')
+    expect(continueRefusal({ ...done, understanding: undefined, missionFile: '/lab/MISSION.md' }, 'more')).toBeUndefined()
     expect(continueRefusal({ ...done, mode: 'subagent', missionFile: '/work/app/ops/orc/MISSION.md' }, 'more')).toContain('/orc start /work/app/ops/orc/MISSION.md')
   })
   test('the finished-mission section tells the orchestrator to continue under orc, never by hand', async () => {

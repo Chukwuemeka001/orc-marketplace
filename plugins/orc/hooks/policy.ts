@@ -65,7 +65,7 @@ export function continueRefusal(m: ContinueLike, request: string): string | unde
   if (!request.trim()) return 'orc continue: say what comes next, in your words: /orc continue <request>.'
   if (m.status === 'running') return `orc continue: mission v${m.version} is still running; tell the orchestrator directly, or record a standing rule with /orc directive <text>.`
   if (m.status !== 'done') return `orc continue: mission v${m.version} is in intake (${m.status}); answer the gates first.`
-  if (!m.understanding) return 'orc continue: this mission has no approved understanding; start with /orc begin <request>.'
+  if (!m.understanding && !m.missionFile) return 'orc continue: this mission has neither an approved understanding nor a mission file; start with /orc begin <request>.'
   if (m.mode === 'subagent') return `orc continue: this mission was orchestrated by a subagent; continue it with /orc start ${m.missionFile ?? `${m.dir}/MISSION.md`} fresh=1 amendment=<request>.`
   return undefined
 }

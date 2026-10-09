@@ -1775,7 +1775,7 @@ async function computerLaunchNote($: EngineInterface, m: OrcMission): Promise<st
 async function continueMission($: EngineInterface, request: string): Promise<string> {
   const m = await read($, missionState)
   const refusal = continueRefusal(m, request)
-  if (refusal || !m?.understanding) return refusal ?? 'orc continue: no approved understanding.'
+  if (refusal || !m) return refusal ?? 'orc continue: no mission.'
   const u = m.understanding
   const at = await $.clock.now()
   const finalPath = `${m.repo}/ops/FINAL.md`
@@ -1789,13 +1789,21 @@ async function continueMission($: EngineInterface, request: string): Promise<str
   const base: OrcMission = { ...m, version, status: 'running', mode: 'main', startedAt: at, missionFile: missionPath, snapshot: undefined, editUnlocked: undefined, brief: undefined, graph: undefined, rulesPath: undefined,
     decisions: [...m.decisions, { at, gate: 'continue', choice: 'approve', note: short(req, 200) }],
     continuations: [...(m.continuations ?? []), { at, version, request: req, previousFinal }], updatedAt: at }
-  await $.fs.write(missionPath, missionFileFrom(base) + `\n## Continuation (v${version}, ${iso(at)})\nThe owner continued the finished mission (previous final: ${previousFinal ?? 'none'}) with this request, which is the amendment and the approval:\n\n${req}\n`)
+  // The mission text: regenerated from the approved understanding (the interview path), or the mission file the owner
+  // started with (/orc start), copied so the owner's own file is never edited.
+  let missionText = ''
+  if (u) missionText = missionFileFrom(base)
+  else { try { missionText = await $.fs.read(m.missionFile ?? missionPath) } catch { missionText = `# Mission (continued)\nRepository: ${m.repo}\n` } }
+  const marker = '\n## Continuation (v'
+  if (missionText.includes(marker)) missionText = missionText.slice(0, missionText.indexOf(marker)) + '\n'
+  await $.fs.write(missionPath, missionText.replace(/\n*$/, '\n') + `\n## Continuation (v${version}, ${iso(at)})\nThe owner continued the finished mission (previous final: ${previousFinal ?? 'none'}) with this request, which is the amendment and the approval:\n\n${req}\n`)
   const row: OrcAgent = { id: MAIN_ORCH, type: 'orc:orchestrator', description: `orchestrator (main session, continued v${version}): ${short(req, 60)}`, status: 'running', startedAt: at, toolCalls: 0, toolErrors: 0, promptChars: 0, steps: 0, modelMs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, classes: {}, activities: {}, tools: [], outProseChars: 0, outThinkChars: 0, outArgChars: 0, ctxTokens: 0, ctxMax: 0, ctxFirst: 0, children: 0, runs: 1 }
   await update($, agents, map => ({ ...(map ?? {}), [MAIN_ORCH]: row }))
   await update($, missionState, () => base)
   await persistMission($, base)
   await note($, { kind: 'spawn', agentId: MAIN_ORCH, text: `mission continued as v${version}: ${short(req, 50)}` })
-  const auto = u.executionPolicy?.mode === 'auto'
+  const auto = u?.executionPolicy?.mode === 'auto' || m.lab?.auto === true
+  const cap = m.lab?.maxAgents ?? u?.executionPolicy?.maxAgents ?? 3
   const rules = mainRules(missionPath, m.repo, req, finalPath) + (auto ? autoModeRules(workbenchDir()) : '')
   const rulesPath = `${OUT_DIR}/mission-${at}.rules.md`
   try { await $.fs.write(rulesPath, rules) } catch { /* best effort */ }
@@ -1808,10 +1816,10 @@ async function continueMission($: EngineInterface, request: string): Promise<str
   const delta = [
     `[orc continue] mission v${m.version} was finished (${previousFinal ?? 'no FINAL status'}; ${prev}); its ops files are now in ops/history/. The owner continues it as v${version} with this request, recorded as the amendment and the approval (no new interview, no new gate):`,
     `"${req}"`,
-    `The approved understanding, plan, rules and standing directives stand (${dir}/UNDERSTANDING.md; mission file ${missionPath}). Plan the continuation from the request and the approved plan: work orders keep the plan's node ids where they apply and take new ones for new steps; every builder goes through the substrate (clones, checks, boundaries, marks, merges); request a checkpoint verifier at the end of each phase; write ${finalPath} (STATUS: PASS or FAIL, never PENDING) only when the request is complete. The mission settles again then, and the owner can continue it again.`,
+    `${u ? `The approved understanding, plan, rules and standing directives stand (${dir}/UNDERSTANDING.md; mission file ${missionPath})` : `The mission the owner started with stands, with the continuation appended (mission file ${missionPath})`}. Plan the continuation from the request and the approved plan: work orders keep the plan's node ids where they apply and take new ones for new steps; every builder goes through the substrate (clones, checks, boundaries, marks, merges); request a checkpoint verifier at the end of each phase; write ${finalPath} (STATUS: PASS or FAIL, never PENDING) only when the request is complete. The mission settles again then, and the owner can continue it again.`,
     auto ? 'The previous graph is finished: write a new Workbench brief for the continuation and hand it to mcp__orc__run_graph.' : '',
   ].filter(Boolean).join('\n')
-  await inboxPush($, { kind: 'notice', text: `orc mission (automatic, continued): ${delta}${computer}\n\n${rules}\n\nMain-session specifics: ${mainSpecifics(u.executionPolicy.maxAgents)}` })
+  await inboxPush($, { kind: 'notice', text: `orc mission (automatic, continued): ${delta}${computer}\n\n${rules}\n\nMain-session specifics: ${mainSpecifics(cap)}` })
   return `orc continue: mission v${m.version} → v${version} for ${m.repo}. The main session is the orchestrator again under the approved rules; clones, checks, verifiers, merges and the pane are back. The owner's request and the working rules arrive as the next prompt.`
 }
 
