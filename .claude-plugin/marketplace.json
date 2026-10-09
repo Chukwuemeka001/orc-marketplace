@@ -1,7 +1,9 @@
 {
-  "name": "orc-dev",
-  "description": "orc, an orchestration mod for Claude Code (local development marketplace)",
-  "owner": { "name": "Emeka Okpara" },
+  "name": "orc",
+  "description": "orc, an orchestration mod for Claude Code: an interview, two approval gates, builders in clones, checks, independent verifiers, merge on acceptance.",
+  "owner": {
+    "name": "Emeka Okpara"
+  },
   "plugins": [
     {
       "name": "orc",

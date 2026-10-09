@@ -18,10 +18,10 @@ orc is a Claude Code mod: a plugin with code that runs inside Claude Code.
 
 ## Install
 ```bash
-claude plugin marketplace add <this repository>
+claude plugin marketplace add Chukwuemeka001/orc-marketplace
 ```
 ```bash
-claude plugin install orc@<marketplace name>
+claude plugin install orc@orc
 ```
 Then start a new session. If `/orc` is not recognised, start Claude Code once with network access: Claude Code
 refreshes its switch for mods when it starts.
@@ -40,7 +40,7 @@ In a folder for the work (an empty one is fine), type:
 4. **The build.** The session dispatches builders, accepts or redoes their work, asks for verification, and writes
    `ops/FINAL.md`. Keep the session open: orc drives it by itself while it runs.
 
-A three-file tool like the quickstart's takes about 5–10 minutes from approval to a verified result.
+A three-file tool like the quickstart's takes about 5–15 minutes from approval to a verified result (measured on a clean install: 14 minutes, with the interview and both gates taking 10 minutes before that).
 
 ## Two modes (chosen at gate 2)
 - **normal:** the session dispatches each builder and accepts each result.
