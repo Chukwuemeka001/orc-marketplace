@@ -28,6 +28,10 @@ export type OrcTurn = {
   tools: { tool: string; cls: OrcClass; act: OrcActivity; ms: number; inBytes: number; outBytes: number; what: string }[]
   spawned: string[]
   finished: { id: string; type: string; ms: number; tools: number; outputTokens: number }[]
+  /** 0.22.0 ledger: set when the prompt was an orc wake ("[orc wake]" / "[orc inbox]" / "[orc graph]"): why the orchestrator woke */
+  wake?: string
+  /** 0.22.0 ledger: the turn's input tokens (input + cache read + cache write, from the engine's usage at turn end) */
+  inTokens?: number
 }
 
 export type OrcAgent = {
@@ -65,8 +69,10 @@ export type OrcAgent = {
   ctxFirst: number
   children: number
   runs: number
-  /** ledger (switch 1): the orchestrator's verdict on this child, recorded via mcp__orc__mark */
+  /** ledger (switch 1): the orchestrator's verdict on this child, recorded via mcp__orc__mark (the latest of `marks`) */
   mark?: { verdict: 'accepted' | 'rejected' | 'redo'; note: string; at: number; by?: string }
+  /** WO-0220c: every mark ever recorded on this child, oldest first (a redo, then the accepted re-run): never shrinks */
+  marks?: { verdict: 'accepted' | 'rejected' | 'redo'; note: string; at: number; by?: string }[]
   /** ledger: full final report saved to a file; the wake carries the latest in full, older ones as pointers */
   reportPath?: string
   reportBytes?: number
@@ -86,7 +92,7 @@ export type OrcAgent = {
   /** switch 3 (reshaped): shell writes are not denied, only flagged for the audit */
   suspects?: { tool: string; target: string; reason: string; at: number }[]
   /** switch 4: the builder's own clone (git worktree + branch) and what happened at acceptance */
-  worktree?: { path: string; branch: string; base: string; merged?: 'merged' | 'conflict' | 'nothing' | 'error'; mergeNote?: string; uncommitted?: string[]; pruned?: boolean }
+  worktree?: { path: string; branch: string; base: string; merged?: 'merged' | 'conflict' | 'nothing' | 'error'; mergeNote?: string; mergeSha?: string; uncommitted?: string[]; pruned?: boolean }
   /** event-driven: verification requests this orchestrator made (receipts) */
   verifyRequests?: { id: string; stage: 'checkpoint' | 'final' | 'integration'; at: number; repo: string; snapshot?: string; pruned?: boolean }[]
   /** integration mode: the repository-level check the integrator owns; `due` is set by a merge and consumed by the sweep */
@@ -107,6 +113,10 @@ export type OrcAgent = {
   preflight?: { ok: boolean; hard: string[]; soft: string[]; at: number }
   check?: { command: string; cwd: string; timeoutMs?: number }
   checkResult?: { status: 'pass' | 'fail' | 'unavailable'; exitCode: number | null; ms: number; outputTail: string; reason?: string }
+  /** WO-0220c: every registered check run, one per return, oldest first (`checkResult` is the latest): never shrinks */
+  checks?: { at: number; status: 'pass' | 'fail' | 'unavailable'; exitCode: number | null; ms: number; outputTail: string; reason?: string }[]
+  /** 0.22.0 ledger: a verifier's report parsed on return (VERDICT / CRITERIA / DEFECTS lines), never the orchestrator's count */
+  verifierCounts?: { verdict: 'PASS' | 'FAIL' | 'none'; pass: number; fail: number; na: number; defects: number }
 }
 
 /** Owner intake (packet 1): the WorkHub owner-journey package. */
@@ -157,7 +167,7 @@ export type OrcMission = {
   startedAt?: number
   missionFile?: string
   /** packet 3: durable projection of the ledger, written by the substrate while the mission runs */
-  snapshot?: { at: number; cursor: number; children: { id: string; type: string; description: string; status: string; startedAt: number; endedAt?: number; mark?: string; merged?: string; branch?: string; reportPath?: string; check?: string }[]; verifyRequests: { id: string; stage: 'checkpoint' | 'final' | 'integration'; at: number }[]; integrationRuns: { at: number; after: string; status: 'pass' | 'fail' | 'unavailable'; load?: number }[] }
+  snapshot?: { at: number; cursor: number; children: { id: string; type: string; description: string; status: string; startedAt: number; endedAt?: number; mark?: string; markAt?: number; merged?: string; branch?: string; reportPath?: string; check?: string }[]; verifyRequests: { id: string; stage: 'checkpoint' | 'final' | 'integration'; at: number }[]; integrationRuns: { at: number; after: string; status: 'pass' | 'fail' | 'unavailable'; load?: number }[] }
   /** owner override of the plugin edit lock for this mission (/orc allow-edit); cleared at settle */
   editUnlocked?: boolean
   /** The orc computer: set by /orc computer on|off (the sandbox settings orc wrote for this repository). */
@@ -177,6 +187,13 @@ export type OrcMission = {
   brief?: { chars: number; renders: number[]; spBefore?: number; spAfter?: number; window?: number; windowSource?: string }
   /** auto mode: a Workbench brief run by the substrate (the runner), pinging the orchestrator only by its policy */
   graph?: OrcGraph
+  /** 0.22.0: what the owner sees at done (the four lines: status · PROVED · READ · ledger), computed once at settle */
+  outcome?: { at: number; version: number; status: string; reading?: string; lines: string[] }
+  /** when this mission record was created (/orc begin, backlog next, continue, start): the intake's first instant */
+  beganAt?: number
+  /** the intake's cost (the main session's turns from beganAt to the launch of the orchestrator row), frozen at launch;
+   *  absent when the launch predates this field or happened where the turns were not this session's */
+  intake?: { requests: number; tokens: number; ms: number }
   updatedAt: number
 }
 

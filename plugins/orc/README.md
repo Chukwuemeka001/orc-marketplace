@@ -70,9 +70,30 @@ its last 3 hours that way).
 For a different goal, queue it: `/orc backlog add <request>`, then `/orc backlog next` when the mission is done; that
 starts a new intake with its gates.
 
+## What you see at the end
+When the mission settles you read four lines, in the pane, the toast (the first two), `/orc status` and `/orc resume`:
+```
+mission v2 DONE · PASS at b0ee8e9 · 9m12
+PROVED  5 children · checks 3/3 · verifiers 6/6, 10/10 · 0 redo · 1.93M (orchestrator 41%) · peak context 212k
+READ    "the --json flag shipped as specified; a nan/inf traceback … fixed (B4)"
+ledger  ops/orc/LEDGER.md · report ops/FINAL.md
+```
+The PROVED line is the substrate's: orc measured every number in it and keeps them all in `ops/orc/LEDGER.md` (with
+`ledger.json` for machines): children with their check, boundary audit, merge and mark; each verification's criteria
+counts; integration runs; the orchestrator's own wakes, context and tokens; one section per version. The READ line is
+the orchestrator's own sentence, the `READING:` line of `ops/FINAL.md`. The orchestrator never writes a PROVED figure:
+it writes CLAIMED (a builder's figure, with the report named) and READ, and at every verification request and at the
+end the substrate stamps the `NUMBERS:` and `PROVED (ledger):` lines of `ops/FINAL.md` (and the `NUMBERS:` line of
+each checkpoint) from the ledger it commits in the same commit. The final verifier checks that those stamped lines
+equal the ledger's headline and that nothing else in the report contradicts the ledger. The orchestrator's share
+counts the intake too (the interview and the two gates, `intake: …` under the ledger's wakes). While the mission runs
+the pane and `/orc status` show the PROVED line so far, in yellow when the current stage has returned work without a
+registered check; `/orc status` on a finished mission prints the four lines.
+
 ## What orc writes
 - **In your repository, `ops/`:**
-  - `ops/orc/`: the mission state, the understanding you approved, and the plan;
+  - `ops/orc/`: the mission state, the understanding you approved, the plan, and the ledger (`LEDGER.md`, `ledger.json`:
+    the substrate's numbers, committed at each verification and at the end);
   - the orchestrator's records: `CONTRACTS.md`, `DECISIONS.md`, `work-orders/`, `FINAL.md`;
   - `integration/check.sh`, an end-to-end check of your criteria;
   - in auto mode, `brief.json`.

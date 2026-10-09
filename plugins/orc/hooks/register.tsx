@@ -1,5 +1,6 @@
 import { atom, read, update } from 'claude-code'
-import { ownReadRoot, shellMask, sweepsStage, browserGranted, computerOf, sandboxSettingsFor, SAFE_BROWSER_TOOLS, UNSAFE_BROWSER_TOOLS, browserCallAllowed, continueRefusal, doneSection } from './policy'
+import { ownReadRoot, shellMask, sweepsStage, browserGranted, computerOf, sandboxSettingsFor, SAFE_BROWSER_TOOLS, UNSAFE_BROWSER_TOOLS, browserCallAllowed, continueRefusal, doneSection, evidenceDigest, verifierCounts, finalReportShape, checkpointReportShape, stampReport, wakeWhy, projectLedger, mergeLedger, renderLedger, ledgerHeadline, ledgerAsOf, ledgerDoneLines, ledgerLiveLine, intakeOf, checkHistory, markHistory, settleBlock, withTurnUsage, closedTurn } from './policy'
+import type { Ledger, LedgerVersion } from './policy'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { OrcActivity, OrcAgent, OrcBucket, OrcClass, OrcCompaction, OrcDemo, OrcEntry, OrcGraph, OrcGraphNode, OrcInboxItem, OrcMission, OrcTurn, OrcUnderstanding } from '../types'
@@ -366,6 +367,90 @@ async function writeLedger($: EngineInterface) {
   return path
 }
 
+/** 0.22.0, the numbers beside the reading (lab: ops/DESIGN-RAW-SIGNAL.md): the substrate writes <repo>/ops/orc/LEDGER.md
+ *  and ledger.json (the durable accumulator, merged by id so a resumed session never zeroes a measured number) on every
+ *  event, and commits both by pathspec at a verification request (the verifier's snapshot carries them) and at settle.
+ *  With `stamp` (WO-0220b) the report at that path gets its NUMBERS: and PROVED (ledger): lines written from this very
+ *  ledger and goes into the same commit, so the orchestrator never copies a figure. Best effort: a failure logs and
+ *  never blocks a request or the settle. Returns the version just written and the stamped file (repo-relative). */
+let LEDGER_LAST: { repo: string; version: number; at: number; v: LedgerVersion } | undefined
+async function repoLedgerWrite($: EngineInterface, opts: { orchId?: string; commit?: string; done?: { status: string }; stamp?: string } = {}): Promise<{ v: LedgerVersion | undefined; stamped?: string }> {
+  try {
+    const map = (await read($, agents)) ?? {}
+    const m = await read($, missionState)
+    const orchId = opts.orchId ?? MAIN_ORCH
+    const orch = map[orchId]
+    if (!orch || !isLedgerType(orch.type)) return { v: undefined }
+    const main = orchId === MAIN_ORCH
+    if (main && (!m || m.mode === 'subagent')) return { v: undefined }
+    const repo = main ? m!.repo : (orch.integration?.repo ?? orch.verifyRequests?.slice(-1)[0]?.repo ?? kidsOf(map, orch).find(k => k.worktree?.base)?.worktree?.base)
+    if (!repo) return { v: undefined }
+    const now = await $.clock.now()
+    const open = main ? await read($, cur) : null
+    const allTurns = main ? [...((await read($, turns)) ?? []), ...(open ? [open] : [])] : []
+    const status: 'running' | 'done' = opts.done || (main && m!.status === 'done') ? 'done' : 'running'
+    const version = main ? m!.version : (m && m.repo === repo ? m.version : 1)
+    const startedAt = main ? (m!.startedAt ?? orch.startedAt) : orch.startedAt
+    const dir = missionDir(repo)
+    let prev: Ledger | undefined
+    try { prev = JSON.parse(await $.fs.read(`${dir}/ledger.json`)) as Ledger; if (prev?.format !== 1 || !Array.isArray(prev.versions)) prev = undefined } catch { prev = undefined }
+    // After settle nothing changes: the settle's own write (opts.done) is the last one for that version.
+    const settled = prev?.versions.find(v => v.version === version && v.status === 'done' && Math.abs(v.startedAt - startedAt) < 120000)
+    if (settled && !opts.done) return { v: settled }
+    const projected = projectLedger({ version, startedAt, now, status, finalStatus: opts.done?.status ?? (main ? m!.outcome?.status : undefined), sessionId: SESSION_ID, orch, kids: kidsOf(map, orch), turns: allTurns, compactions: main ? (m!.compactions ?? []).length : 0, gates: main ? m!.graph?.gates : undefined, intake: main ? m!.intake : { requests: 0, tokens: 0, ms: 0 } })
+    const merged = mergeLedger(prev, projected, repo, now)
+    try { await $.process.run(['mkdir', '-p', dir], { timeoutMs: 10000 }) } catch { /* best effort */ }
+    await $.fs.write(`${dir}/ledger.json`, JSON.stringify(merged, null, 2))
+    await $.fs.write(`${dir}/LEDGER.md`, renderLedger(merged, now))
+    const v = merged.versions.find(x => x.version === version)
+    if (v) LEDGER_LAST = { repo, version, at: now, v }
+    // The stamp: the report's NUMBERS: line carries this ledger's time and its PROVED (ledger): line this ledger's
+    // headline, verbatim, so the final verifier compares two copies of the substrate's own text. Nothing else moves.
+    let stamped: string | undefined
+    if (opts.stamp && v) {
+      try {
+        const asOf = ledgerAsOf(v, now)
+        const before = await $.fs.read(opts.stamp)
+        const res = stampReport(before, ledgerHeadline(v, asOf), asOf)
+        if (res.stamped.length) {
+          if (res.text !== before) await $.fs.write(opts.stamp, res.text)
+          const root = repo.replace(/\/+$/, '')
+          stamped = opts.stamp.startsWith(`${root}/`) ? opts.stamp.slice(root.length + 1) : undefined
+          await note($, { kind: 'note', agentId: orchId, text: `stamped ${res.stamped.join(' + ')} in ${stamped ?? opts.stamp} from the ledger (as of ${new Date(asOf).toISOString()})` })
+        }
+      } catch (err) { $.ui.log(`report stamp failed: ${String(err)}`, { to: 'debug' }) }
+    }
+    if (opts.commit) {
+      // By pathspec, never a sweep: `git commit -- <paths>` records those files (the two ledger files and the stamped
+      // report) in ONE commit whatever else is staged.
+      const paths = ['ops/orc/LEDGER.md', 'ops/orc/ledger.json', ...(stamped ? [stamped] : [])].map(p => `"${p.replace(/["$`\\]/g, "'")}"`).join(' ')
+      try {
+        const r = await $.process.run(['/bin/sh', '-c', `cd "${repo}" && git add ${paths} && git commit -q -m "${opts.commit.replace(/["$`\\]/g, "'")}" -- ${paths}`], { timeoutMs: 30000 })
+        if (r.exitCode !== 0 && !/nothing to commit|no changes added|nothing added/.test(`${r.stdout}\n${r.stderr}`)) $.ui.log(`ledger commit failed: ${short((r.stderr || r.stdout).trim(), 160)}`, { to: 'debug' })
+      } catch (err) { $.ui.log(`ledger commit failed: ${String(err)}`, { to: 'debug' }) }
+    }
+    return { v, stamped }
+  } catch (err) {
+    $.ui.log(`ledger write failed: ${String(err)}`, { to: 'debug' })
+    return { v: undefined }
+  }
+}
+
+/** The live PROVED line of the running main-mode mission, shared by the pane and /orc status: the last written ledger
+ *  version when it is this mission's (a resumed session shows the accumulated numbers), else a projection of the
+ *  session's own records. */
+async function liveLedgerLine($: EngineInterface): Promise<{ text: string; warn: boolean } | undefined> {
+  const mis = await read($, missionState)
+  const map = (await read($, agents)) ?? {}
+  const orchRow = map[MAIN_ORCH]
+  if (!mis || mis.status !== 'running' || mis.mode === 'subagent' || !orchRow) return undefined
+  const now = await $.clock.now()
+  const lv = LEDGER_LAST && LEDGER_LAST.repo === mis.repo && LEDGER_LAST.version === mis.version ? LEDGER_LAST.v : undefined
+  const open = await read($, cur)
+  const all = [...((await read($, turns)) ?? []), ...(open ? [open] : [])]
+  return ledgerLiveLine(lv ?? projectLedger({ version: mis.version, startedAt: mis.startedAt ?? orchRow.startedAt, now, status: 'running', sessionId: SESSION_ID, orch: orchRow, kids: kidsOf(map, orchRow), turns: all, compactions: (mis.compactions ?? []).length, gates: mis.graph?.gates, intake: mis.intake }), now)
+}
+
 // A kickoff file: when it holds text, submit it as a prompt once and blank it.
 
 /** Switches an orchestrator type runs with. `orc:orchestrator` is the packaged default: everything on. The historical
@@ -439,7 +524,7 @@ const VERIFIER_BRIEF = (stage: 'checkpoint' | 'final', repo: string, mission: st
     : `No snapshot could be cut, so check ${repo} as it is now; if git status shows files changing under you, say so in the report. `) +
   (stage === 'checkpoint'
     ? `A checkpoint checks work done so far, not the finished mission. Its scope is the newest ops/CHECKPOINT-*.md in ${snap ? 'the snapshot' : 'the repository'}${scopeNote ? `, and the orchestrator's note: "${scopeNote.replace(/"/g, "'")}"` : ''}. Check every mission "Done means" item that scope names by running things (tests, CLI, real inputs named in the mission, the golden check). An item outside the scope, work the scope says is still being built, and the orchestrator's final report are NOT IN SCOPE: list them under NOT CHECKED, never FAIL. With no scope file and no note, check every "Done means" item except the final report. `
-    : `Check every mission "Done means" item${amendment && amendment !== '(none)' ? ` AND every item of the amendment in ${amendment}` : ''}, by running things. The orchestrator's final report (${snap && finalPath.startsWith(`${repo}/`) ? `${snap.path}/${finalPath.slice(repo.length + 1)}` : finalPath}) is committed as a draft whose STATUS line reads PENDING until a final verification passes: check that it has the sections the mission asks for and that its claims match the repository; a PENDING status is expected, not a failure. `) +
+    : `Check every mission "Done means" item${amendment && amendment !== '(none)' ? ` AND every item of the amendment in ${amendment}` : ''}, by running things. The orchestrator's final report (${snap && finalPath.startsWith(`${repo}/`) ? `${snap.path}/${finalPath.slice(repo.length + 1)}` : finalPath}) is committed as a draft whose STATUS line reads PENDING until a final verification passes: check that it has the sections the mission asks for and that its claims match the repository; a PENDING status is expected, not a failure. Its NUMBERS: and PROVED (ledger): lines were stamped by the substrate in the same commit as ops/orc/LEDGER.md (the substrate's numbers, in the same tree): check that they equal the ledger's headline; any other figure the report presents as measured must not contradict the ledger; a figure that matches the ledger, or cites a CLAIMED report, needs no label, and an unlabelled figure that matches is not a failure. `) +
   `Rules: read-only, change nothing in the repository; write scratch files only under your own temp directory; never read any directory under ${repo.replace(/\/[^/]+\/?$/, '')} whose name starts with hidden, and never write inside a corpus or fixture directory the mission names as read-only; the machine may be loaded, so skip inputs over 100 MB and run any performance test once, reporting the measured time together with the 1-minute load average and core count (sysctl -n vm.loadavg / hw.ncpu, or /proc/loadavg / nproc); a timing miss while the load exceeds the core count is "UNMEASURED under load", not FAIL; finish within about 8 minutes. Report in exactly this shape, at most 40 lines: VERDICT: PASS|FAIL (one line, naming the commit checked). CRITERIA: one line per criterion, "PASS|FAIL|N/A <n> <criterion> — <command> → <evidence in a few words>". DEFECTS: most serious first, at most 5, one line each with command and evidence, or none. NOT CHECKED: at most 5 lines. Nothing else.`
 
 /** Switch 4: a per-builder clone, a git worktree on its own branch cut from the repository's HEAD. */
@@ -521,10 +606,11 @@ Working rules
 - VERIFICATION: the first four lines of ${repo}/ops/DECISIONS.md must be exactly "REPO: ${repo}", "MISSION: ${mission}", "AMENDMENT: ${amendment ?? '(none)'}", "FINAL: ${finalPath}". Verifiers check a snapshot of the repository's HEAD, so COMMIT everything you want verified before you request it. When the first integrated version exists, write ${repo}/ops/CHECKPOINT-1.md naming what the checkpoint covers and what is still being built (the verifier checks only what it covers), commit it, and call mcp__orc__request_verification {stage: "checkpoint"}. When the amendment (if any) is done and its checks pass, write ${finalPath} as a draft whose status line reads "STATUS: PENDING final verification", commit it, then call {stage: "final"}; after fixing anything a final verifier failed, update the draft, commit, and call {stage: "final"} again. Receipts are not verdicts; reports arrive as wakes. Mark verifiers like any other child. Do not change the status line from PENDING until a final verification has passed or you have recorded why you are stopping.
 - DELTA LEDGER: you keep no status file. Each wake tells you what changed and what is actionable, and separates what the substrate PROVED (the registered check it ran, the boundary audit, the merge) from what the child CLAIMED: never re-run the registered check; spot-check only claims the check does not cover, and say in the mark note what you ran. The full ledger is in a file named in every wake, for context loss only. Record verdicts with mcp__orc__mark {taskId, verdict: accepted|rejected|redo, note}. Keep ${repo}/ops/DECISIONS.md (numbered, append-only). Call mcp__orc__status when you need the current state without a wake.
 - INTEGRATION: after your first accepted merge the substrate dispatches an integrator that writes ${repo}/ops/integration/check.sh; the substrate runs it after every merge; a FAIL wakes you; a PASS rides your next wake, or wakes you when nothing else is running. Request an integration pass with mcp__orc__request_verification {stage: "integration"} after the amendment lands.
+- NUMBERS: you never count and never write a PROVED figure: the substrate keeps every number of the run in ${repo}/ops/orc/LEDGER.md and stamps the "NUMBERS:" and "PROVED (ledger):" lines of your reports itself, at each verification request and at settle. ${finalPath} starts with "STATUS: …", "READING: <one sentence, yours>", "NUMBERS: ops/orc/LEDGER.md" and has a "## Numbers" section with "CLAIMED (reports): <a child's figures, naming the report file>" and "READ: <your sentence>"; a final request without them is refused; CHECKPOINT-n.md carries NUMBERS: too. Elsewhere in a report never restate measurements: point to ops/orc/LEDGER.md, and label a child's figure CLAIMED with its report named.
 - ${forbidden ? `${forbidden} ` : ''}Never read any directory whose name starts with "hidden" (an owner's acceptance suite may live there). Never write outside ${repo} except the final report and scratch under your own temp directory.
 - Stop rule: two failed rounds on the same issue means change the shape of the work, not a third retry.
 
-Finish by writing ${finalPath}: what was built; what was verified and the exact commands; deviations; known gaps; a per-builder account (asked, came back, redone); how many times you were resumed. Your last message is that path and the status line from it.`
+Finish by writing ${finalPath} (the STATUS / READING / NUMBERS lines and the "## Numbers" section first): what was built; what was verified and the exact commands; deviations; known gaps; a per-builder account (asked, came back, redone); how many times you were resumed. Your last message is that path and the status line from it.`
 }
 
 /** Start a mission: write the orchestrator prompt and have the main loop spawn the orchestrator (so its hooks are observed). */
@@ -611,8 +697,8 @@ async function scoreDemo($: EngineInterface) {
   await update($, demo, cur0 => (cur0 ? { ...cur0, scored } : cur0))
   const line = `orc demo: hidden acceptance suite ${passed}/${total} ${ok ? 'PASS' : 'FAIL'} · final report ${d.finalPath} · ${status}`
   try { await $.fs.write(`${d.repo}/ops/SCORE.md`, `# Demo score\n\n${line}\n\n\`\`\`\n${scored.tail}\n\`\`\`\n`) } catch { /* best effort */ }
-  $.ui.toast(line)
-  $.ui.log(line)
+  $.ui.toast(line.replace(/^orc demo: /, 'demo: '))
+  $.ui.log(line.replace(/^orc demo: /, 'demo: '))
   await note($, { kind: 'note', agentId: 'demo', text: line })
   void $.prompt.submit({ text: `orc demo (automatic): finished. ${line}. Tell the user this score in one line (and the file ${d.repo}/ops/SCORE.md); do nothing else.` })
 }
@@ -815,7 +901,7 @@ async function persistMission($: EngineInterface, m: OrcMission) {
     await $.fs.write(`${dir}/state.json`, JSON.stringify(m, null, 2))
     await $.fs.write(`${dir}/UNDERSTANDING.md`, renderUnderstanding(m))
   } catch (err) {
-    $.ui.log(`orc: mission persist failed: ${String(err)}`)
+    $.ui.log(`mission persist failed: ${String(err)}`)
   }
 }
 
@@ -872,7 +958,7 @@ async function askGate($: EngineInterface) {
     return
   }
   const fresh = await read($, missionState)
-  if (!fresh || fresh.status !== m.status || fresh.version !== m.version) { $.ui.log('orc: that gate was already decided; the dialog answer was not used.'); return }
+  if (!fresh || fresh.status !== m.status || fresh.version !== m.version) { $.ui.log('that gate was already decided; the dialog answer was not used.'); return }
   if (answer === 'Use the computer first') {
     for (const line of `${(await computerSwitch($, true)).replace(/^orc computer:\s*/, '')}\nThe gate waits for you there.`.split('\n')) $.ui.log(line)
     return
@@ -930,7 +1016,7 @@ async function launchApprovedMission($: EngineInterface): Promise<string> {
   try {
     const inside = await $.process.run(['git', '-C', m.repo, 'rev-parse', '--git-dir'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1 }))
     if (inside.exitCode !== 0) await $.process.run(['/bin/sh', '-c', `mkdir -p "${m.repo}" && git -C "${m.repo}" init -q`], { timeoutMs: 15000 })
-  } catch (err) { $.ui.log(`orc: git init of ${m.repo} failed: ${String(err)}`, { to: 'debug' }) }
+  } catch (err) { $.ui.log(`git init of ${m.repo} failed: ${String(err)}`, { to: 'debug' }) }
   const missionPath = `${dir}/MISSION.md`
   await $.fs.write(missionPath, missionFileFrom(m))
   const at = await $.clock.now()
@@ -946,10 +1032,13 @@ async function launchApprovedMission($: EngineInterface): Promise<string> {
   // full substrate (clones, checks, boundaries, merges, integrator, verifiers); wakes arrive as prompts.
   const row: OrcAgent = { id: MAIN_ORCH, type: 'orc:orchestrator', description: `orchestrator (main session): ${short(m.understanding.mission.statement, 60)}`, status: 'running', startedAt: at, toolCalls: 0, toolErrors: 0, promptChars: 0, steps: 0, modelMs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, classes: {}, activities: {}, tools: [], outProseChars: 0, outThinkChars: 0, outArgChars: 0, ctxTokens: 0, ctxMax: 0, ctxFirst: 0, children: 0, runs: 1 }
   await update($, agents, map => ({ ...(map ?? {}), [MAIN_ORCH]: row }))
-  const next: OrcMission = { ...m, status: 'running', startedAt: at, missionFile: missionPath, updatedAt: at }
+  // The intake's cost (interview and gates, from /orc begin to here) is frozen now: the ledger counts it in the
+  // orchestrator's share and the headline total.
+  const intake = m.beganAt !== undefined ? intakeOf((await read($, turns)) ?? [], m.beganAt, at) : undefined
+  const next: OrcMission = { ...m, status: 'running', startedAt: at, missionFile: missionPath, intake, updatedAt: at }
   await update($, missionState, () => next)
   await persistMission($, next)
-  await note($, { kind: 'spawn', agentId: MAIN_ORCH, text: `main session is the orchestrator: ${short(m.understanding.mission.statement, 50)}` })
+  await note($, { kind: 'spawn', agentId: MAIN_ORCH, text: `main session is the orchestrator: ${short(m.understanding.mission.statement, 50)}${intake ? ` · intake ${intake.requests} requests, ${k(intake.tokens)} tokens` : ''}` })
   const auto = m.understanding.executionPolicy?.mode === 'auto'
   const rules = mainRules(missionPath, m.repo, undefined, `${m.repo}/ops/FINAL.md`) + (auto ? autoModeRules(workbenchDir()) + (await prepareStartingBrief($, m.repo, true)) : '')
   const rulesPath = `${OUT_DIR}/mission-${at}.rules.md`
@@ -959,6 +1048,7 @@ async function launchApprovedMission($: EngineInterface): Promise<string> {
   const withRules: OrcMission = { ...base, brief: { chars: orchestratorBrief(base).length, renders: [], spBefore: acct.sp, window: acct.window, windowSource: acct.windowSource } }
   await update($, missionState, () => withRules)
   await persistMission($, withRules)
+  await repoLedgerWrite($)
   const caps = m.understanding.executionPolicy.capabilities ?? []
   // The orc computer: when gate 2 granted workers a browser, orc proves that browser now (a local page at 375 px), so a
   // broken browser surfaces while the owner is here.
@@ -1015,7 +1105,7 @@ function orchestratorBrief(m: OrcMission): string {
     '- Verification: mcp__orc__request_verification {stage checkpoint|final|integration}; its result says SPAWN NOW: spawn exactly that verifier, once. Integrators arrive as "[orc inbox]" items; after the first merge the substrate runs ops/integration/check.sh after every merge.',
     '- "[orc inbox]" items are binding: act on each once; never spawn an agent whose description already runs.',
     '- Auto mode (optional): hand the substrate a Workbench brief with mcp__orc__run_graph; it runs builders, verifiers and retries by the brief\'s policy and pings you only by that policy ("[orc graph]"). Look with mcp__orc__graph_status; answer pings with mcp__orc__graph_decide. Do not mark graph children yourself.',
-    `- State on demand: mcp__orc__status. Full ledger, for context loss only: ${OUT_DIR}/ledger/main.md. Durable state: ${missionDir(m.repo)}/state.json.`,
+    `- State on demand: mcp__orc__status. Full ledger, for context loss only: ${OUT_DIR}/ledger/main.md. Durable state: ${missionDir(m.repo)}/state.json. The numbers: ${missionDir(m.repo)}/LEDGER.md is the substrate's count, and the substrate stamps the NUMBERS: and PROVED (ledger): lines of your reports from it; you never write a PROVED figure, you name CLAIMED reports and label your own sentences READ.`,
     '- After a compaction, or whenever you are unsure what is pending: call mcp__orc__status first, reread your working rules, then act. Never re-dispatch merged or running work; never re-run a registered check.',
     '- Between wakes end your turn; never poll or sleep. Decisions go in ops/DECISIONS.md (numbered, append-only); standing owner rules via mcp__orc__directive.',
   ].join('\n')
@@ -1070,6 +1160,7 @@ async function compactionDone($: EngineInterface, at: number) {
   const item = await inboxPush($, { kind: 'notice', text })
   const doneAt = await $.clock.now()
   await patchMission($, x => ({ ...x, compactions: (x.compactions ?? []).map(r => (r.at === at ? { ...r, compactedAt: doneAt, orientId: item.id } : r)) }))
+  await repoLedgerWrite($)
 }
 
 /** Recovery log: a main-session tool call right after a compaction (orc's own tools are answered by their dedicated
@@ -1333,12 +1424,12 @@ async function graphPump($: EngineInterface): Promise<string[]> {
     try {
       const r = await $.agent.spawn({ subagentType: 'orc:builder', description: `graph ${n.id}: ${short(n.objective, 48)}`, prompt: builderPrompt(g, n, m.repo) })
       const id = (r as { agentId?: string }).agentId
-      if (!id) { $.ui.log(`orc graph: spawn of ${n.id} refused: ${JSON.stringify(r)}`); continue }
+      if (!id) { $.ui.log(`graph: spawn of ${n.id} refused: ${JSON.stringify(r)}`); continue }
       const at = await $.clock.now()
       await patchNode($, n.id, x => ({ ...x, status: 'building', builderId: id, attempts: 0, startedAt: at }))
       started.push(n.id)
     } catch (err) {
-      $.ui.log(`orc graph: spawn of ${n.id} failed: ${String(err)}`)
+      $.ui.log(`graph: spawn of ${n.id} failed: ${String(err)}`)
     }
   }
   return started
@@ -1482,7 +1573,7 @@ async function acceptNode($: EngineInterface, n: OrcGraphNode, why: string) {
     const orch = map2[MAIN_ORCH]
     const m2 = await read($, missionState)
     if (orch?.integration?.due && m2 && !graphIntegratorPending(m2) && !(await $.fs.exists(`${m2.repo}/ops/integration/check.sh`))) await dispatchIntegrator($, map2, orch, m2.repo, `after graph ${n.id}: author the integration check`, true)
-  } catch (err) { $.ui.log(`orc graph: integrator dispatch failed: ${String(err)}`, { to: 'debug' }) }
+  } catch (err) { $.ui.log(`graph: integrator dispatch failed: ${String(err)}`, { to: 'debug' }) }
   await graphAdvance($, { ...n, status: 'passed' })
 }
 
@@ -1611,10 +1702,11 @@ async function startMainLab($: EngineInterface, a: { mission: string; repo: stri
   await update($, agents, map => ({ ...(map ?? {}), [MAIN_ORCH]: row }))
   try { await $.process.run(['mkdir', '-p', missionDir(a.repo)], { timeoutMs: 10000 }) } catch { /* best effort */ }
   const acct = await promptAccounting($)
-  const m0: OrcMission = { repo: a.repo, dir: missionDir(a.repo), version: 1, status: 'running', mode: 'main', findings: [], decisions: [], startedAt: at, missionFile: a.mission, rulesPath, lab: { compactAt: a.compactAt, maxCompactions: 2, maxAgents: cap, auto: a.auto }, compactions: [], updatedAt: at }
+  const m0: OrcMission = { repo: a.repo, dir: missionDir(a.repo), version: 1, status: 'running', mode: 'main', findings: [], decisions: [], beganAt: at, startedAt: at, intake: { requests: 0, tokens: 0, ms: 0 }, missionFile: a.mission, rulesPath, lab: { compactAt: a.compactAt, maxCompactions: 2, maxAgents: cap, auto: a.auto }, compactions: [], updatedAt: at }
   const m: OrcMission = { ...m0, brief: { chars: orchestratorBrief(m0).length, renders: [], spBefore: acct.sp, window: acct.window, windowSource: acct.windowSource } }
   await update($, missionState, () => m)
   await persistMission($, m)
+  await repoLedgerWrite($)
   await note($, { kind: 'spawn', agentId: MAIN_ORCH, text: `main session is the orchestrator (lab): ${a.mission.replace(/.*\//, '')}${a.compactAt ? ` · forced compaction at ≥ ${k(a.compactAt)}` : ''}` })
   await inboxPush($, { kind: 'notice', text: `orc mission (automatic): the owner started this mission with /orc. ${rules}\n\nMain-session specifics: ${mainSpecifics(cap)}` })
   return `orc start: the main session is now the orchestrator for ${a.repo} (mission ${a.mission}${a.amendment ? `, amendment ${a.amendment}` : ''}, rules ${rulesPath}${a.compactAt ? `; lab: the substrate compacts this session once its context reaches ${k(a.compactAt)}, at a moment with work in flight` : ''}).${a.archived} Its working rules arrive as the next prompt.`
@@ -1633,7 +1725,7 @@ async function syncMissionState($: EngineInterface) {
   const snap: NonNullable<OrcMission['snapshot']> = {
     at: await $.clock.now(),
     cursor: orch.cursor ?? 0,
-    children: kids.map(c => ({ id: c.id, type: c.type, description: c.description, status: c.status, startedAt: c.startedAt, endedAt: c.endedAt, mark: c.mark ? `${c.mark.verdict}: ${short(c.mark.note, 80)}` : undefined, merged: c.worktree?.merged, branch: c.worktree?.branch, reportPath: c.reportPath, check: c.checkResult?.status })),
+    children: kids.map(c => ({ id: c.id, type: c.type, description: c.description, status: c.status, startedAt: c.startedAt, endedAt: c.endedAt, mark: c.mark ? `${c.mark.verdict}: ${short(c.mark.note, 80)}` : undefined, markAt: c.mark?.at, merged: c.worktree?.merged, branch: c.worktree?.branch, reportPath: c.reportPath, check: c.checkResult?.status })),
     verifyRequests: (orch.verifyRequests ?? []).map(v => ({ id: v.id, stage: v.stage, at: v.at })),
     integrationRuns: (orch.integration?.runs ?? []).map(r => ({ at: r.at, after: r.after, status: r.status, load: r.load })),
   }
@@ -1661,7 +1753,8 @@ async function resumeMission($: EngineInterface, repoGiven?: string): Promise<st
   const directives = (m.directives ?? []).slice(-5).map(d => `- ${iso(d.at)} ${d.text}`).join('\n')
   if (m.status === 'done') {
     const bl = (m.backlog ?? []).filter(b => b.status === 'queued')
-    return `${head}\nThis mission is finished (${m.snapshot ? `${m.snapshot.children.length} children, ${m.snapshot.children.filter(c => c.merged === 'merged').length} merges` : 'no snapshot'}). Final report: ${repo}/ops/FINAL.md. Continue it under orc with /orc continue <request> (same rules, no new gates).${bl.length ? `\nBacklog has ${bl.length} queued item(s); start the next with /orc backlog next.` : '\nBacklog is empty; add the next request with /orc backlog add <request> or start a new intake with /orc begin <request>.'}${directives ? `\nStanding directives:\n${directives}` : ''}`
+    const outcome = m.outcome?.version === m.version && m.outcome.lines?.length ? `\n${m.outcome.lines.join('\n')}` : ''
+    return `${head}${outcome}\nThis mission is finished (${m.snapshot ? `${m.snapshot.children.length} children, ${m.snapshot.children.filter(c => c.merged === 'merged').length} merges` : 'no snapshot'}). Final report: ${repo}/ops/FINAL.md. Continue it under orc with /orc continue <request> (same rules, no new gates).${bl.length ? `\nBacklog has ${bl.length} queued item(s); start the next with /orc backlog next.` : '\nBacklog is empty; add the next request with /orc backlog add <request> or start a new intake with /orc begin <request>.'}${directives ? `\nStanding directives:\n${directives}` : ''}`
   }
   if (m.status !== 'running') {
     openPane($)
@@ -1679,7 +1772,7 @@ async function resumeMission($: EngineInterface, repoGiven?: string): Promise<st
   for (const c of snap?.children ?? []) {
     if (map[c.id]) continue
     adopted += 1
-    additions[c.id] = { id: c.id, type: c.type, description: c.description, status: c.status, startedAt: c.startedAt, endedAt: c.endedAt, toolCalls: 0, toolErrors: 0, promptChars: 0, steps: 0, modelMs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, parentId: MAIN_ORCH, classes: {}, activities: {}, tools: [], outProseChars: 0, outThinkChars: 0, outArgChars: 0, ctxTokens: 0, ctxMax: 0, ctxFirst: 0, children: 0, runs: 1, reportPath: c.reportPath, mark: c.mark ? { verdict: c.mark.split(':')[0] as 'accepted' | 'rejected' | 'redo', note: c.mark.slice(c.mark.indexOf(':') + 2), at: c.endedAt ?? c.startedAt } : undefined, worktree: c.branch ? { path: '', branch: c.branch, base: repo, merged: c.merged as 'merged' | 'conflict' | 'nothing' | 'error' | undefined, pruned: true } : undefined }
+    additions[c.id] = { id: c.id, type: c.type, description: c.description, status: c.status, startedAt: c.startedAt, endedAt: c.endedAt, toolCalls: 0, toolErrors: 0, promptChars: 0, steps: 0, modelMs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, parentId: MAIN_ORCH, classes: {}, activities: {}, tools: [], outProseChars: 0, outThinkChars: 0, outArgChars: 0, ctxTokens: 0, ctxMax: 0, ctxFirst: 0, children: 0, runs: 1, reportPath: c.reportPath, mark: c.mark ? { verdict: c.mark.split(':')[0] as 'accepted' | 'rejected' | 'redo', note: c.mark.slice(c.mark.indexOf(':') + 2), at: c.markAt ?? c.endedAt ?? c.startedAt } : undefined, worktree: c.branch ? { path: '', branch: c.branch, base: repo, merged: c.merged as 'merged' | 'conflict' | 'nothing' | 'error' | undefined, pruned: true } : undefined }
   }
   await update($, agents, mp => ({ ...(mp ?? {}), ...additions }))
   const kids = Object.values({ ...map, ...additions }).filter(a => a.parentId === MAIN_ORCH)
@@ -1699,6 +1792,7 @@ async function resumeMission($: EngineInterface, repoGiven?: string): Promise<st
   const next: OrcMission = { ...m, updatedAt: at }
   await update($, missionState, () => next)
   await persistMission($, next)
+  await repoLedgerWrite($)
   await note($, { kind: 'spawn', agentId: MAIN_ORCH, text: `mission v${m.version} resumed; ${adopted} children adopted` })
   await inboxPush($, { kind: 'notice', text: `orc mission (automatic, resumed): ${delta}\n\n${rules}\n\nMain-session specifics: dispatch builders yourself (orc:builder, run_in_background true, CHECK:/CHECK_CWD:/MAY_CHANGE: lines); act on "[orc wake]" prompts; spawn verifiers/integrator only when a tool result or an "[orc inbox]" item says SPAWN NOW (once each); owner limit ${u?.executionPolicy.maxAgents ?? 3} builders at a time; end your turn between wakes.` })
   return `${head}\nResumed as the orchestrator in this session: ${adopted} children adopted, ${merged.length} merged, ${unmarked.length} unmarked. The working rules and the delta arrive as the next prompt.`
@@ -1732,12 +1826,13 @@ async function backlogOp($: EngineInterface, action: 'list' | 'add' | 'next', re
   if (!nextItem) return 'orc backlog next: nothing queued.'
   if (m.status !== 'done') return `orc backlog next: the current mission is ${m.status}; finish or settle it first.`
   const seed: OrcUnderstanding = { mission: { statement: '', deliverables: [] }, finalPicture: { summary: '', criteria: [], constraints: [], exclusions: [] }, plan: { nodes: [] }, team: { roles: [] }, executionPolicy: { model: 'inherit', maxAgents: 3, maxAttemptsPerNode: 2, maxDurationMinutes: 120, allowedEffects: ['local_read', 'local_write'], materialChangeRule: '' }, executionTarget: { kind: 'git_repository', repositoryPath: m.repo, allowedPaths: [] }, sourceEvidence: { originalRequest: nextItem.request, items: [{ id: 'e1', text: nextItem.request, classification: 'supplied', role: 'context', source: `owner, backlog ${nextItem.id}` }], coverage: [] }, openQuestions: [] }
-  const next: OrcMission = { ...m, version: m.version + 1, status: 'drafting', understanding: seed, findings: ['(seed only: interview, then draft)'], decisions: [], snapshot: undefined, startedAt: undefined, missionFile: undefined, backlog: list.map(b => b.id === nextItem.id ? { ...b, status: 'started' } : b), updatedAt: at }
+  const next: OrcMission = { ...m, version: m.version + 1, status: 'drafting', understanding: seed, findings: ['(seed only: interview, then draft)'], decisions: [], snapshot: undefined, startedAt: undefined, missionFile: undefined, beganAt: at, intake: undefined, outcome: undefined, backlog: list.map(b => b.id === nextItem.id ? { ...b, status: 'started' } : b), updatedAt: at }
   await update($, missionState, () => next); await persistMission($, next)
   return `orc backlog: started ${nextItem.id} as mission v${next.version} (intake, stage 1). Original request recorded.\n\n${await ownerContext($, m.repo)}\n\nInterview the owner now (restate, then one question at a time with options).`
 }
 
-/** A previous run's ops files go to ops/history/<stamp>/ (committed), and its clones are removed. */
+/** A previous run's ops files go to ops/history/<stamp>/ (committed), and its clones are removed. ops/orc/ stays where it
+ *  is: LEDGER.md and ledger.json keep one section per version, so a continued mission adds a section and loses nothing. */
 async function archivePreviousRun($: EngineInterface, repo: string) {
   const isRepo = (await $.process.run(['git', '-C', repo, 'rev-parse', 'HEAD'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1 }))).exitCode === 0
   if (isRepo && (await $.fs.exists(`${repo}/ops/DECISIONS.md`))) {
@@ -1791,7 +1886,7 @@ async function continueMission($: EngineInterface, request: string): Promise<str
   const version = m.version + 1
   const req = request.trim()
   const missionPath = `${dir}/MISSION.md`
-  const base: OrcMission = { ...m, version, status: 'running', mode: 'main', startedAt: at, missionFile: missionPath, snapshot: undefined, editUnlocked: undefined, brief: undefined, graph: undefined, rulesPath: undefined,
+  const base: OrcMission = { ...m, version, status: 'running', mode: 'main', beganAt: at, startedAt: at, intake: { requests: 0, tokens: 0, ms: 0 }, missionFile: missionPath, snapshot: undefined, editUnlocked: undefined, brief: undefined, graph: undefined, rulesPath: undefined,
     decisions: [...m.decisions, { at, gate: 'continue', choice: 'approve', note: short(req, 200) }],
     continuations: [...(m.continuations ?? []), { at, version, request: req, previousFinal }], updatedAt: at }
   // The mission text: regenerated from the approved understanding (the interview path), or the mission file the owner
@@ -1816,6 +1911,8 @@ async function continueMission($: EngineInterface, request: string): Promise<str
   const withRules: OrcMission = { ...base, rulesPath, brief: { chars: orchestratorBrief({ ...base, rulesPath }).length, renders: [], spBefore: acct.sp, window: acct.window, windowSource: acct.windowSource } }
   await update($, missionState, () => withRules)
   await persistMission($, withRules)
+  // The ledger keeps the finished version's section and opens a new one for this version (nothing is lost).
+  await repoLedgerWrite($)
   const computer = await computerLaunchNote($, withRules)
   const prev = m.snapshot ? `${m.snapshot.children.length} children, ${m.snapshot.children.filter(c => c.merged === 'merged').length} merged` : 'no snapshot'
   const delta = [
@@ -1828,17 +1925,26 @@ async function continueMission($: EngineInterface, request: string): Promise<str
   return `orc continue: mission v${m.version} → v${version} for ${m.repo}. The main session is the orchestrator again under the approved rules; clones, checks, verifiers, merges and the pane are back. The owner's request and the working rules arrive as the next prompt.`
 }
 
-/** A running mission settles to done once its final report is committed with a non-PENDING status and no orc agent is live. */
+/** A running mission settles to done once its final report has a non-PENDING status, no orc agent is live and no
+ *  main-session turn is open (WO-0220c): called at the end of the main session's turn.complete, after that turn's tokens
+ *  are on the orchestrator's row and its wake is in the ledger, and from the tick, which finds a turn open and leaves
+ *  it. One settle at a time: the two callers can meet. */
+let SETTLING = false
 async function settleMission($: EngineInterface) {
+  if (SETTLING) return
+  SETTLING = true
+  try { await settleMissionNow($) } finally { SETTLING = false }
+}
+async function settleMissionNow($: EngineInterface) {
   const m = await read($, missionState)
   if (!m || m.status !== 'running') return
   const finalPath = `${m.repo}/ops/FINAL.md`
   if (!(await $.fs.exists(finalPath))) return
   const status = /^STATUS:.*$/m.exec(await $.fs.read(finalPath))?.[0] ?? ''
-  if (!status || /PENDING/i.test(status)) return
   const map = (await read($, agents)) ?? {}
   // The main row itself is 'running' until settled: it must not block the settle.
-  if (Object.values(map).some(a => a.id !== MAIN_ORCH && a.type.startsWith('orc:') && a.startedAt >= (m.startedAt ?? 0) && (a.status === 'running' || a.status === 'pending'))) return
+  const live = Object.values(map).filter(a => a.id !== MAIN_ORCH && a.type.startsWith('orc:') && a.startedAt >= (m.startedAt ?? 0) && (a.status === 'running' || a.status === 'pending')).length
+  if (settleBlock({ status: status || undefined, liveChildren: live, turnOpen: !!(await read($, cur)) })) return
   // Final snapshot before the status flips (the sync only runs while the mission is running).
   try { await syncMissionState($) } catch { /* best effort */ }
   const m2 = (await read($, missionState)) ?? m
@@ -1850,7 +1956,19 @@ async function settleMission($: EngineInterface) {
   const started = (next.backlog ?? []).find(b => b.status === 'started')
   if (started) { const n2: OrcMission = { ...next, backlog: next.backlog!.map(b => b.id === started.id ? { ...b, status: 'done' } : b) }; await update($, missionState, () => n2); await persistMission($, n2) }
   await note($, { kind: 'note', agentId: 'owner', text: `mission v${m.version} done: ${short(status, 60)}` })
-  $.ui.toast(`orc: mission v${m.version} done — ${short(status, 60)} · /orc continue <request> keeps going under orc`)
+  // The numbers beside the reading: the final ledger write and commit, then the four lines the owner reads
+  // (status · PROVED · READ · ledger), kept in the mission state for the pane, /orc status and /orc resume.
+  let reading: string | undefined
+  try { reading = /^READING:\s*(.+)$/m.exec(await $.fs.read(finalPath))?.[1]?.trim() } catch { reading = undefined }
+  // The settle ledger re-stamps the report's NUMBERS: and PROVED (ledger): lines and goes into the same commit.
+  const { v } = await repoLedgerWrite($, { commit: `orc: ledger at settle (v${m.version}, ${short(status.replace(/^STATUS:\s*/i, ''), 40)})`, done: { status }, stamp: finalPath })
+  const lines = v ? ledgerDoneLines(v, at, { status, reading }) : [`mission v${m.version} DONE · ${short(status.replace(/^STATUS:\s*/i, ''), 60)}`, 'PROVED  (the ledger could not be written; see the session log)', `READ    ${reading ? `"${short(reading, 110)}"` : '(no READING: line in ops/FINAL.md)'}`, 'ledger  ops/orc/LEDGER.md · report ops/FINAL.md']
+  await update($, missionState, mm => (mm ? { ...mm, outcome: { at, version: m.version, status, reading, lines }, updatedAt: at } : mm))
+  const withOutcome = await read($, missionState)
+  if (withOutcome) await persistMission($, withOutcome)
+  // The engine leads every ui.log line and toast with the plugin's name: no "orc: " of our own here.
+  for (const l of lines) $.ui.log(l)
+  $.ui.toast(`${lines[0]} — ${lines[1]}`, { timeoutMs: 20000 })
 }
 
 /** Process one due integration run (set by a merge): run the registered script if it exists, otherwise have the integrator write it. */
@@ -1903,6 +2021,7 @@ async function processIntegration($: EngineInterface) {
     if (run.status !== 'pass' && repeat) await note($, { kind: 'note', agentId: orch.id, text: `integration FAIL repeats the previous run's failing steps; no re-dispatch` })
     run.redispatched = run.status !== 'pass' && !repeat
     await patchAgent($, orch.id, a => ({ ...a, integration: a.integration ? { ...a.integration, runs: [...a.integration.runs, run].slice(-40) } : a.integration }))
+    await repoLedgerWrite($, { orchId: orch.id })
     // Wake on actionable only (r11): a PASS is a state change but nothing to act on, so it stays unreported and
     // rides in the CHANGED section of the next wake; a FAIL or an unavailable check wakes the orchestrator now.
     // But a PASS with nothing else in flight is the only news that can come, so it wakes (v0.15.0 permission test: the
@@ -1948,8 +2067,9 @@ async function markReported($: EngineInterface, map: Record<string, OrcAgent>, o
   try {
     await $.fs.write(`${OUT_DIR}/ledger/${orchId.slice(0, 7)}.md`, fullLedger(map, orchId, now))
   } catch (err) {
-    $.ui.log(`orc: full ledger write failed: ${String(err)}`, { to: 'debug' })
+    $.ui.log(`full ledger write failed: ${String(err)}`, { to: 'debug' })
   }
+  await repoLedgerWrite($, { orchId })
 }
 
 async function makeClone($: EngineInterface, base: string, description: string): Promise<{ path: string; branch: string } | undefined> {
@@ -1960,12 +2080,12 @@ async function makeClone($: EngineInterface, base: string, description: string):
     const path = `${base.replace(/\/+$/, '')}-wt/${slug}-${stamp}`
     const ran = await $.process.run(['git', '-C', base, 'worktree', 'add', '-b', branch, path, 'HEAD'], { timeoutMs: 60000 })
     if (ran.exitCode !== 0) {
-      $.ui.log(`orc: worktree add failed: ${short(ran.stderr, 160)}`)
+      $.ui.log(`worktree add failed: ${short(ran.stderr, 160)}`)
       return undefined
     }
     return { path, branch }
   } catch (err) {
-    $.ui.log(`orc: makeClone failed: ${String(err)}`)
+    $.ui.log(`makeClone failed: ${String(err)}`)
     return undefined
   }
 }
@@ -1985,7 +2105,7 @@ async function makeSnapshot($: EngineInterface, repo: string, stage: string): Pr
     const path = `${root}/verify-${stage}-${sha.slice(0, 7)}-${(await $.clock.now()).toString(36).slice(-5)}`
     const ran = await $.process.run(['git', '-C', repo, 'worktree', 'add', '--detach', path, sha], { timeoutMs: 60000 })
     if (ran.exitCode !== 0) {
-      $.ui.log(`orc: snapshot worktree failed: ${short(ran.stderr, 160)}`)
+      $.ui.log(`snapshot worktree failed: ${short(ran.stderr, 160)}`)
       return undefined
     }
     // The verifier may read only the snapshot, so it gets the mission files orc keeps uncommitted (v0.15.1 clean run:
@@ -2000,20 +2120,21 @@ async function makeSnapshot($: EngineInterface, repo: string, stage: string): Pr
     }
     return { path, sha, dirty }
   } catch (err) {
-    $.ui.log(`orc: makeSnapshot failed: ${String(err)}`)
+    $.ui.log(`makeSnapshot failed: ${String(err)}`)
     return undefined
   }
 }
 
 /** Switch 4: merge a builder's branch into the repository at acceptance. Never leaves a half-merge behind. */
-async function mergeClone($: EngineInterface, wt: NonNullable<OrcAgent['worktree']>): Promise<{ merged: 'merged' | 'conflict' | 'nothing' | 'error'; note: string }> {
+async function mergeClone($: EngineInterface, wt: NonNullable<OrcAgent['worktree']>): Promise<{ merged: 'merged' | 'conflict' | 'nothing' | 'error'; note: string; sha?: string }> {
   try {
     const ahead = await $.process.run(['git', '-C', wt.base, 'rev-list', '--count', `HEAD..${wt.branch}`], { timeoutMs: 30000 })
     if (ahead.exitCode === 0 && ahead.stdout.trim() === '0') return { merged: 'nothing', note: `branch ${wt.branch} has no commits beyond the repository (the builder did not commit?)` }
     const m = await $.process.run(['git', '-C', wt.base, 'merge', '--no-ff', '--no-edit', '-m', `merge ${wt.branch} (accepted)`, wt.branch], { timeoutMs: 60000 })
     if (m.exitCode === 0) {
       const stat = await $.process.run(['git', '-C', wt.base, 'diff', '--stat', 'HEAD~1', 'HEAD'], { timeoutMs: 30000 })
-      return { merged: 'merged', note: short(stat.stdout.trim().split('\n').slice(-1)[0] ?? '', 120) }
+      const head = await $.process.run(['git', '-C', wt.base, 'rev-parse', '--short=7', 'HEAD'], { timeoutMs: 10000 }).catch(() => ({ exitCode: 1, stdout: '' }))
+      return { merged: 'merged', note: short(stat.stdout.trim().split('\n').slice(-1)[0] ?? '', 120), sha: head.exitCode === 0 ? head.stdout.trim() || undefined : undefined }
     }
     const conflicts = await $.process.run(['git', '-C', wt.base, 'diff', '--name-only', '--diff-filter=U'], { timeoutMs: 30000 })
     await $.process.run(['git', '-C', wt.base, 'merge', '--abort'], { timeoutMs: 30000 })
@@ -2115,14 +2236,23 @@ async function inboxAck($: EngineInterface, pred: (i: OrcInboxItem) => boolean, 
 /** Items that still need a delivery: never delivered, or delivered more than INBOX_REDELIVER_MS ago and not acknowledged. */
 const inboxDue = (list: OrcInboxItem[], now: number) => list.filter(i => !i.ackedAt && (i.delivered.length === 0 || now - i.delivered[i.delivered.length - 1]!.at > INBOX_REDELIVER_MS))
 
-/** The idle door: one prompt carrying every due item, only while no main turn is open. */
+/** The idle door: one prompt carrying every due item, only while no main turn is open. One caller at a time: a main
+ *  turn's end and the 2 s tick can coincide (proof 0.22.0, session 644151b2, 20:12:21: the same wake was submitted
+ *  twice, 20 ms apart, and the second prompt ran as a turn of its own); a caller that waited re-reads the inbox, and
+ *  what the first one just marked delivered is no longer due. */
+let inboxDoor: Promise<void> = Promise.resolve()
 async function inboxDeliverIfIdle($: EngineInterface, why: string) {
+  const mine = inboxDoor.then(() => inboxDeliverNow($, why))
+  inboxDoor = mine.catch(() => undefined)
+  return mine
+}
+async function inboxDeliverNow($: EngineInterface, why: string) {
   if (await read($, cur)) return
   const now = await $.clock.now()
   const due = inboxDue((await read($, inboxState)) ?? [], now)
   if (!due.length) return
   await inboxMarkDelivered($, due.map(i => i.id), 'prompt')
-  if (due.some(i => i.delivered.length > 0)) $.ui.log(`orc: inbox re-delivered as a prompt (${why}): ${due.map(i => i.id).join(', ')}`)
+  if (due.some(i => i.delivered.length > 0)) $.ui.log(`inbox re-delivered as a prompt (${why}): ${due.map(i => i.id).join(', ')}`)
   void $.prompt.submit({ text: `orc inbox (automatic) — ${inboxBlock(due, now, false)}` })
 }
 
@@ -2144,7 +2274,7 @@ async function inboxSweep($: EngineInterface, map: Record<string, OrcAgent>, now
   await inboxDeliverIfIdle($, 'sweep')
   const kept = ((await read($, inboxState)) ?? []).filter(i => !i.ackedAt || now - i.ackedAt < INBOX_RETIRE_MS)
   if (kept.length !== list.length) await update($, inboxState, () => kept)
-  for (const i of kept.filter(x => !x.ackedAt && x.kind === 'spawn' && x.delivered.length >= 3)) $.ui.log(`orc: inbox ${i.id} delivered ${i.delivered.length}× and "${i.spawn?.description}" has not appeared`, { to: 'debug' })
+  for (const i of kept.filter(x => !x.ackedAt && x.kind === 'spawn' && x.delivered.length >= 3)) $.ui.log(`inbox ${i.id} delivered ${i.delivered.length}× and "${i.spawn?.description}" has not appeared`, { to: 'debug' })
 }
 
 /** A spawn or a relay for the main loop: the brief goes to a file, the instruction to the inbox. */
@@ -2462,11 +2592,6 @@ function failLines(tail: string) {
   const keep = ls.filter(l => /^\s*(FAIL|SKIP|INTEGRATION|Error|error:|Traceback)/.test(l))
   return [...new Set([...keep, ...ls.slice(-5)])].join('\n').slice(-1200)
 }
-/** A passing check's tail reduced to its measured facts (test counts, timings, OK/PASS lines): at most 4 lines on one line. */
-function evidenceDigest(tail: string) {
-  const facts = tail.split('\n').map(l => l.trim()).filter(l => l && /\b(Ran \d+|\d+ (passed|failed|tests?)|elapsed|INTEGRATION|OK\b|PASS\b|\d+(\.\d+)?\s?(s|ms|sec)\b)/.test(l))
-  return facts.slice(-4).map(l => short(l, 90)).join(' · ')
-}
 function budgetReport(text: string, path: string | undefined) {
   if (text.length <= WAKE_REPORT_BUDGET) return text
   const cut = text.lastIndexOf('\n', WAKE_REPORT_BUDGET)
@@ -2561,8 +2686,9 @@ export const register: Register = on => {
   on('prompt.section', async ($, e, next) => {
     const r = await next(e)
     if (e.name !== 'env_info_simple') return r
-    const m = await read($, missionState)
-    if (missionDoneHere(m)) return { text: `${r.text ?? ''}\n\n${doneSection(m)}` }
+    const m0 = await read($, missionState)
+    if (missionDoneHere(m0)) return { text: `${r.text ?? ''}\n\n${doneSection(m0)}` }
+    const m = m0 as OrcMission | null
     if (!mainMissionLive(m) || !mainOrch((await read($, agents)) ?? {})) return r
     const brief = orchestratorBrief(m)
     if (briefNoted !== m.startedAt) { briefNoted = m.startedAt; await note($, { kind: 'note', agentId: MAIN_ORCH, text: `orchestrator brief rendered into the system prompt (${brief.length} chars)` }) }
@@ -2628,7 +2754,7 @@ export const register: Register = on => {
     try { tokens = (await $.session.usage()).context.tokens } catch { tokens = undefined }
     const at = await compactionStarts($, String(e.trigger), tokens)
     const r = await next({ ...e, instructions: [e.instructions, compactKeep(m)].filter(Boolean).join('\n\n') })
-    try { await compactionDone($, at) } catch (err) { $.ui.log(`orc: post-compaction orientation failed: ${String(err)}`) }
+    try { await compactionDone($, at) } catch (err) { $.ui.log(`post-compaction orientation failed: ${String(err)}`) }
     return r
   })
 
@@ -2644,7 +2770,7 @@ export const register: Register = on => {
       })
     } catch (err) {
       // A user skill or another plugin may own /orc; the substrate must still load (tools, agent types, hooks).
-      $.ui.log(`orc: /orc command not registered (${short(String(err), 120)}); use the mcp__orc__* tools instead`)
+      $.ui.log(`/orc command not registered (${short(String(err), 120)}); use the mcp__orc__* tools instead`)
     }
 
     const CORE = ['Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob']
@@ -2655,7 +2781,7 @@ export const register: Register = on => {
         inputSchema: { type: 'object', properties: { taskId: { type: 'string' }, verdict: { type: 'string', enum: ['accepted', 'rejected', 'redo'] }, note: { type: 'string' } }, required: ['taskId', 'verdict', 'note'] },
       })
     } catch (err) {
-      $.ui.log(`orc: tool.register mark failed: ${String(err)}`)
+      $.ui.log(`tool.register mark failed: ${String(err)}`)
     }
     try {
       await $.tool.register({
@@ -2664,7 +2790,7 @@ export const register: Register = on => {
         inputSchema: { type: 'object', properties: { stage: { type: 'string', enum: ['checkpoint', 'final', 'integration'] }, note: { type: 'string' }, repo: { type: 'string', description: 'absolute repository path; needed only before any builder has been dispatched' } }, required: ['stage'] },
       })
     } catch (err) {
-      $.ui.log(`orc: tool.register request_verification failed: ${String(err)}`)
+      $.ui.log(`tool.register request_verification failed: ${String(err)}`)
     }
     try {
       await $.tool.register({
@@ -2673,7 +2799,7 @@ export const register: Register = on => {
         inputSchema: { type: 'object', properties: { mission: { type: 'string' }, repo: { type: 'string' }, amendment: { type: 'string' }, final: { type: 'string' }, archive: { type: 'boolean', description: 'true: move a repository that already holds a run aside (<repo>.prev-<date>) and start fresh' }, fresh: { type: 'boolean', description: 'true: start even though the repository already holds a run' } }, required: ['mission'] },
       })
     } catch (err) {
-      $.ui.log(`orc: tool.register start failed: ${String(err)}`)
+      $.ui.log(`tool.register start failed: ${String(err)}`)
     }
     if (LAB) try {
       await $.tool.register({
@@ -2682,7 +2808,7 @@ export const register: Register = on => {
         inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'bundled example: wordfreq (default) or tradelog' }, mode: { type: 'string', enum: ['subagent', 'main'], description: 'main: this session orchestrates' }, compactAt: { type: 'number', description: 'lab, main mode: force a compaction once context reaches this many tokens' } } },
       })
     } catch (err) {
-      $.ui.log(`orc: tool.register demo failed: ${String(err)}`)
+      $.ui.log(`tool.register demo failed: ${String(err)}`)
     }
     for (const spec of [
       { name: 'owner_context', description: 'Owner intake: the drafting contract, the package shape, the repository facts and the current mission state (findings, last owner decision and note). Read it before drafting or revising an understanding.', inputSchema: { type: 'object', properties: { repo: { type: 'string', description: 'absolute repository path; defaults to the current mission or the session repository' } } } },
@@ -2698,7 +2824,7 @@ export const register: Register = on => {
       { name: 'backlog', description: 'The mission backlog in the repository state: list, add <request>, or next (start the next queued request as a new intake once the current mission is done).', inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'add', 'next'] }, request: { type: 'string' } }, required: ['action'] } },
       { name: 'continue', description: 'Continue a FINISHED mission with the owner\'s next request, in their words (the next phase, "carry on until done", a follow-up). No new interview or gate: the approved understanding, plan, rules and standing directives carry into a new version under orc, with clones, checks, verifiers, merges and the pane; the request is recorded as the amendment and the approval. Use it instead of orchestrating by hand after ops/FINAL.md. Same as /orc continue <request>.', inputSchema: { type: 'object', properties: { request: { type: 'string', description: "the owner's request, verbatim" } }, required: ['request'] } },
     ]) {
-      try { await $.tool.register(spec) } catch (err) { $.ui.log(`orc: tool.register ${spec.name} failed: ${String(err)}`) }
+      try { await $.tool.register(spec) } catch (err) { $.ui.log(`tool.register ${spec.name} failed: ${String(err)}`) }
     }
     try {
       await $.tool.register({
@@ -2707,7 +2833,7 @@ export const register: Register = on => {
         inputSchema: { type: 'object', properties: { note: { type: 'string' } } },
       })
     } catch (err) {
-      $.ui.log(`orc: tool.register status failed: ${String(err)}`)
+      $.ui.log(`tool.register status failed: ${String(err)}`)
     }
     for (const spec of [
       { name: 'orchestrator', description: 'Orchestrator on the orc substrate: background wake with a delta ledger, registered checks on return, write boundaries with dispatch preflight, per-builder clones merged at acceptance, substrate-dispatched verifiers and an integration check after every merge (no MCP).', prompt: ORCHESTRATOR_FULL_PROMPT, tools: [...CORE, 'Agent', 'mcp__orc__mark', 'mcp__orc__steer', 'mcp__orc__request_verification', 'mcp__orc__status'] },
@@ -2718,7 +2844,7 @@ export const register: Register = on => {
       try {
         await $.agent.register({ ...spec, ...(LAB_MODEL ? { model: LAB_MODEL } : {}), ...(LAB_EFFORT ? { effort: LAB_EFFORT } : {}), ...(WORKERS_READ_CLAUDE_MD ? {} : { omitClaudeMd: true as const }), mcpServers: [] })
       } catch (err) {
-        $.ui.log(`orc: agent.register ${spec.name} failed: ${String(err)}`)
+        $.ui.log(`agent.register ${spec.name} failed: ${String(err)}`)
       }
     }
     // The orc computer: a builder and a verifier that also hold the mission's browser (local pages only). Spawning one
@@ -2733,7 +2859,7 @@ export const register: Register = on => {
         try {
           await $.agent.register({ ...spec, ...(LAB_MODEL ? { model: LAB_MODEL } : {}), ...(LAB_EFFORT ? { effort: LAB_EFFORT } : {}), ...(WORKERS_READ_CLAUDE_MD ? {} : { omitClaudeMd: true as const }), mcpServers: [{ 'orc-browser': server }] })
         } catch (err) {
-          $.ui.log(`orc: agent.register ${spec.name} failed: ${String(err)}`)
+          $.ui.log(`agent.register ${spec.name} failed: ${String(err)}`)
         }
       }
     }
@@ -2754,12 +2880,12 @@ export const register: Register = on => {
         const text = (await $.fs.read(once)).trim()
         if (text) {
           await $.fs.write(once, '')
-          $.ui.log(`orc: continuing from continue-on-reload.txt (${text.length} chars)`)
+          $.ui.log(`continuing from continue-on-reload.txt (${text.length} chars)`)
           void $.prompt.submit({ text })
         }
       }
     } catch (err) {
-      $.ui.log(`orc: continue-on-reload failed: ${String(err)}`, { to: 'debug' })
+      $.ui.log(`continue-on-reload failed: ${String(err)}`, { to: 'debug' })
     }
     let ticks = 0
 
@@ -2771,10 +2897,10 @@ export const register: Register = on => {
       const hasStranded = Object.values(map).some(a => isLedgerType(a.type) && (a.pendingWakes?.length ?? 0) > 0)
       const hasDue = Object.values(map).some(a => isIntegType(a.type) && a.integration?.due)
       if (ticks % 5 === 0) {
-        try { await scoreDemo($) } catch (err) { $.ui.log(`orc: demo scoring failed: ${String(err)}`, { to: 'debug' }) }
-        try { await syncMissionState($) } catch (err) { $.ui.log(`orc: mission sync failed: ${String(err)}`, { to: 'debug' }) }
-        try { await settleMission($) } catch (err) { $.ui.log(`orc: mission settle failed: ${String(err)}`, { to: 'debug' }) }
-        try { await maybeForceCompact($) } catch (err) { $.ui.log(`orc: forced compaction failed: ${String(err)}`, { to: 'debug' }) }
+        try { await scoreDemo($) } catch (err) { $.ui.log(`demo scoring failed: ${String(err)}`, { to: 'debug' }) }
+        try { await syncMissionState($) } catch (err) { $.ui.log(`mission sync failed: ${String(err)}`, { to: 'debug' }) }
+        try { await settleMission($) } catch (err) { $.ui.log(`mission settle failed: ${String(err)}`, { to: 'debug' }) }
+        try { await maybeForceCompact($) } catch (err) { $.ui.log(`forced compaction failed: ${String(err)}`, { to: 'debug' }) }
       }
       const inboxList = (await read($, inboxState)) ?? []
       const inboxOpen = inboxList.some(i => !i.ackedAt)
@@ -2782,7 +2908,7 @@ export const register: Register = on => {
       // tool call is still running is lost on some engines. Redelivery of unacknowledged items stays on the sweep.
       const nowTick = await $.clock.now()
       if (inboxList.some(i => !i.ackedAt && i.delivered.length === 0 && nowTick - i.at > 1500)) {
-        try { await inboxDeliverIfIdle($, 'tick') } catch (err) { $.ui.log(`orc: inbox delivery failed: ${String(err)}`, { to: 'debug' }) }
+        try { await inboxDeliverIfIdle($, 'tick') } catch (err) { $.ui.log(`inbox delivery failed: ${String(err)}`, { to: 'debug' }) }
       }
       // A gate that waits for the owner is asked in the question dialog once the session is idle (not mid-turn, no
       // inbox item still going out).
@@ -2795,7 +2921,7 @@ export const register: Register = on => {
         try {
           await processIntegration($)
         } catch (err) {
-          $.ui.log(`orc: integration run failed: ${String(err)}`)
+          $.ui.log(`integration run failed: ${String(err)}`)
         }
       }
       if (ticks % 15 === 0) {
@@ -2831,7 +2957,7 @@ export const register: Register = on => {
           }
           await inboxSweep($, map, await $.clock.now())
         } catch (err) {
-          $.ui.log(`orc: inbox sweep failed: ${String(err)}`, { to: 'debug' })
+          $.ui.log(`inbox sweep failed: ${String(err)}`, { to: 'debug' })
         }
       }
       // Dead-man sweep (every 30 s): only for children the engine ended without any event we could hook.
@@ -2877,7 +3003,7 @@ export const register: Register = on => {
                 await relayViaMain($, 'send', { to: par.id, text: ledgerWake(fresh, par.id, a.id, now, msg) })
                 await note($, { kind: 'send', agentId: a.id, text: `wake (ended ${seen.status}) → ${par.id.slice(0, 7)} via main` })
               } catch (err) {
-                $.ui.log(`orc: wake on ended child failed: ${String(err)}`)
+                $.ui.log(`wake on ended child failed: ${String(err)}`)
               }
             }
           }
@@ -2902,7 +3028,7 @@ export const register: Register = on => {
     })
 
     const opened = await openPane($)
-    if (!opened.isPlaced) $.ui.log(`orc: pane waits (${opened.reason}); /orc opens it`, { to: 'debug' })
+    if (!opened.isPlaced) $.ui.log(`pane waits (${opened.reason}); /orc opens it`, { to: 'debug' })
     return next(e)
   })
 
@@ -2928,6 +3054,7 @@ export const register: Register = on => {
       tools: [],
       spawned: [],
       finished: [],
+      wake: (e as { agentId?: string }).agentId ? undefined : wakeWhy(e.text),
     }
     await update($, cur, () => fresh)
     if (!(e as { agentId?: string }).agentId) {
@@ -3034,7 +3161,7 @@ export const register: Register = on => {
             map = (await read($, agents)) ?? map
           }
         } catch (err) {
-          $.ui.log(`orc: backfill for ${e.agentId.slice(0, 7)} failed: ${String(err)}`, { to: 'debug' })
+          $.ui.log(`backfill for ${e.agentId.slice(0, 7)} failed: ${String(err)}`, { to: 'debug' })
         }
       }
       const row = map[e.agentId]
@@ -3048,6 +3175,8 @@ export const register: Register = on => {
         cacheReadTokens: a.cacheReadTokens + (u?.cache_read_input_tokens ?? 0),
         cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (u?.cache_creation_input_tokens ?? 0),
         answerHead: short(flat(e.answer), 160),
+        // A verifier's report is counted by the substrate (VERDICT / CRITERIA / DEFECTS), never by the orchestrator.
+        ...(baseType(a.type) === 'orc:verifier' && e.reason === 'answer' ? { verifierCounts: verifierCounts(e.answer) } : {}),
       }))
       if (row) {
         await patchCur($, t => ({
@@ -3065,7 +3194,7 @@ export const register: Register = on => {
           await $.session.send({ to: row.id, text })
           await note($, { kind: 'send', agentId: row.id, text: `flushed ${queued.length} queued wake(s)` })
         } catch (err) {
-          $.ui.log(`orc: flush of queued wakes failed: ${String(err)}`)
+          $.ui.log(`flush of queued wakes failed: ${String(err)}`)
         }
       }
       // Wake: relay a lab child's final report to its orchestrator parent so the parent resumes.
@@ -3081,7 +3210,8 @@ export const register: Register = on => {
             const ownReport = answerText
             if (isChecksType(parent.type) && isCheckedChild(row.type)) {
               const res = await runCheck($, row)
-              await patchAgent($, row.id, a => ({ ...a, checkResult: res }))
+              // WO-0220c: every return's check is kept (a redo's FAIL stays beside the re-run's PASS); checkResult = latest.
+              await patchAgent($, row.id, a => ({ ...a, checkResult: res, checks: [...checkHistory(a), { at: now, ...res }].slice(-20) }))
               // An integrator's return ran the integration check at HEAD: any merge still waiting on it is covered.
               if (row.type === 'orc:integrator') await patchAgent($, parent.id, a => ({ ...a, integration: a.integration ? { ...a.integration, due: undefined } : a.integration }))
               let boundaryText = ''
@@ -3118,7 +3248,7 @@ export const register: Register = on => {
           else await deliverWake($, parent.id, row.id, text)
           await note($, { kind: 'send', agentId: row.id, text: `wake → ${parent.id.slice(0, 7)} (${short(row.description, 30)})` })
         } catch (err) {
-          $.ui.log(`orc: wake relay failed: ${String(err)}`)
+          $.ui.log(`wake relay failed: ${String(err)}`)
         } finally {
           await patchAgent($, row.id, a => ({ ...a, relaying: false }))
         }
@@ -3126,27 +3256,31 @@ export const register: Register = on => {
       try {
         await writeAgents($)
       } catch (err) {
-        $.ui.log(`orc: agents write failed: ${String(err)}`, { to: 'debug' })
+        $.ui.log(`agents write failed: ${String(err)}`, { to: 'debug' })
       }
       return next(e)
     }
-    if (mainOrch((await read($, agents)) ?? {})) {
-      const u = e.usage
-      await patchAgent($, MAIN_ORCH, a => ({ ...a, inputTokens: a.inputTokens + (u?.input_tokens ?? 0), outputTokens: a.outputTokens + (u?.output_tokens ?? 0), cacheReadTokens: a.cacheReadTokens + (u?.cache_read_input_tokens ?? 0), cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (u?.cache_creation_input_tokens ?? 0) }))
-    }
+    // The turn's usage goes on the orchestrator's row first, then the turn closes (WO-0220c: the settle below sees both).
+    if (mainOrch((await read($, agents)) ?? {})) await patchAgent($, MAIN_ORCH, a => withTurnUsage(a, e.usage))
     const open = await read($, cur)
     if (open) {
-      const closed: OrcTurn = { ...open, endedAt: now, reason: e.reason, answer: short(flat(e.answer), 200) }
+      const closed = closedTurn(open, e.usage, now, e.reason, short(flat(e.answer), 200))
       await update($, turns, list => [...(list ?? []), closed].slice(-TURNS_CAP))
       await update($, cur, () => null)
-      // The session is idle now: the inbox's prompt door opens.
-      try { await inboxDeliverIfIdle($, 'turn end') } catch (err) { $.ui.log(`orc: inbox delivery at turn end failed: ${String(err)}`, { to: 'debug' }) }
       try {
         await writeLedger($)
       } catch (err) {
-        $.ui.log(`orc: ledger write failed: ${String(err)}`, { to: 'debug' })
+        $.ui.log(`ledger write failed: ${String(err)}`, { to: 'debug' })
       }
+      // The wake just closed is a row in the repository ledger (the orchestrator's own cost).
+      if (mainOrch((await read($, agents)) ?? {})) await repoLedgerWrite($)
     }
+    // WO-0220c: the settle check runs here, once this turn is on the orchestrator's row and in the ledger, so the turn
+    // that wrote STATUS is in the settle's ledger (proof 2 settled mid-turn on the tick and lost it). Before the inbox
+    // opens: a prompt it submits would open the next turn and push the settle to that turn's end.
+    try { await settleMission($) } catch (err) { $.ui.log(`mission settle failed: ${String(err)}`, { to: 'debug' }) }
+    // The session is idle now: the inbox's prompt door opens.
+    if (open) { try { await inboxDeliverIfIdle($, 'turn end') } catch (err) { $.ui.log(`inbox delivery at turn end failed: ${String(err)}`, { to: 'debug' }) } }
     return next(e)
   })
 
@@ -3176,6 +3310,24 @@ export const register: Register = on => {
     }
     if (!mission) return { deny: `orc request_verification: ${repo}/ops/DECISIONS.md must start with MISSION: and AMENDMENT: lines` }
     finalPath ||= `${repo}/ops/FINAL.md`
+    // The numbers beside the reading (0.22.0): a final request is refused until the draft carries the orchestrator's
+    // READING, the NUMBERS pointer and the three labelled lines; a checkpoint without NUMBERS: only gets a warning.
+    let shapeWarning = ''
+    if (stage === 'final') {
+      let draft = ''
+      try { draft = await $.fs.read(finalPath) } catch { draft = '' }
+      const missing = finalReportShape(draft)
+      if (missing.length) return { deny: `orc request_verification: REFUSED — the final report ${draft ? finalPath : `${finalPath} (not found)`} lacks: ${missing.join('; ')}. Its first lines are "STATUS: PENDING final verification", "READING: <your one-sentence reading of the outcome>" and "NUMBERS: ops/orc/LEDGER.md", and it has a "## Numbers" section with a line starting "CLAIMED (reports):" (a child's figures, naming its report file) and a line starting "READ:" (your sentence); the substrate stamps the "PROVED (ledger):" line and the NUMBERS: time itself. Fix the draft, commit it, and request again.` }
+    }
+    // The report the substrate stamps at this request (the final draft, or the newest checkpoint), committed with the ledger.
+    let stampPath = stage === 'final' ? finalPath : ''
+    if (stage === 'checkpoint') {
+      try {
+        const ls = await $.process.run(['/bin/sh', '-c', `ls -1 "${repo}/ops"/CHECKPOINT-*.md 2>/dev/null | sort -V | tail -1`], { timeoutMs: 10000 })
+        const newest = ls.stdout.trim()
+        if (newest) { stampPath = newest; const missing = checkpointReportShape(await $.fs.read(newest)); if (missing.length) shapeWarning = ` WARNING: ${newest.replace(`${repo}/`, '')} has no NUMBERS: line; add "NUMBERS: ops/orc/LEDGER.md" to the next checkpoint (the substrate stamps the time; a final request without that line is refused).` }
+      } catch { /* best effort */ }
+    }
     const at = await $.clock.now()
     const id = `vr-${stage}-${at}`
     if (stage === 'integration') {
@@ -3186,6 +3338,10 @@ export const register: Register = on => {
       return { result: ok ? `receipt ${id}: integration pass requested at ${new Date(at).toISOString()} for ${repo}; the integrator is being dispatched and its report will arrive as a wake. This receipt is not a verdict.` : `receipt ${id}: an integrator is already running or was dispatched under 90 s ago; its report will arrive as a wake. No second one was dispatched.` }
     }
     const description = `auto verifier: ${stage} [for ${orch.id.slice(0, 7)}]`
+    // The ledger is written, the report stamped from it and both committed together BEFORE the snapshot is cut, so the
+    // verifier reads the substrate's numbers twice: in the ledger and in the report's stamped lines.
+    const written = await repoLedgerWrite($, { orchId: orch.id, commit: `orc: ledger at ${stage} request (cursor ${orch.cursor ?? 0})`, stamp: stampPath || undefined })
+    const stampedNote = written.stamped ? ` The substrate stamped the NUMBERS: and PROVED (ledger): lines of ${written.stamped} from the ledger and committed them with it; never edit those two lines.` : ''
     const snap = await makeSnapshot($, repo, stage)
     const item = await relayViaMain($, 'spawn-verifier', { web: !!BROWSER && browserGranted(await read($, missionState), 'verifier'), description, prompt: VERIFIER_BRIEF(stage, repo, mission, amendment || '(none)', finalPath, snap, stage === 'checkpoint' && typeof input.note === 'string' ? short(input.note.trim(), 400) : undefined) })
     let spawnNow = ''
@@ -3196,7 +3352,7 @@ export const register: Register = on => {
     await patchAgent($, orch.id, a => ({ ...a, verifyRequests: [...(a.verifyRequests ?? []), { id, stage, at, repo, snapshot: snap?.path }] }))
     await note($, { kind: 'spawn', agentId: orch.id, text: `request_verification ${stage} → ${id}${snap ? ` @ ${snap.sha.slice(0, 7)}` : ' (no snapshot)'}` })
     const dirty = snap?.dirty ? ` WARNING: uncommitted changes in ${repo} (${snap.dirty}) are NOT in the snapshot; commit and request again if they matter.` : ''
-    return { result: `receipt ${id}: ${stage} verification requested at ${new Date(at).toISOString()} for ${repo}${snap ? ` at commit ${snap.sha.slice(0, 12)} (snapshot ${snap.path})` : ' (no snapshot: the verifier checks the live repository)'}; ${orch.id === MAIN_ORCH ? 'you spawn the verifier (instruction below)' : 'the verifier is being dispatched through the main loop'} and its report will arrive as a wake. This receipt is not a verdict.${dirty}${spawnNow}` }
+    return { result: `receipt ${id}: ${stage} verification requested at ${new Date(at).toISOString()} for ${repo}${snap ? ` at commit ${snap.sha.slice(0, 12)} (snapshot ${snap.path})` : ' (no snapshot: the verifier checks the live repository)'}; ${orch.id === MAIN_ORCH ? 'you spawn the verifier (instruction below)' : 'the verifier is being dispatched through the main loop'} and its report will arrive as a wake. This receipt is not a verdict.${stampedNote}${dirty}${shapeWarning}${spawnNow}` }
   })
 
   on('tool.call', { tool: 'mcp__orc__owner_context' }, async ($, e) => {
@@ -3310,7 +3466,7 @@ export const register: Register = on => {
     const orch = input.agentId ? map[input.agentId] : mainOrch(map)
     if (!orch || !isLedgerType(orch.type)) {
       const mm = await read($, missionState)
-      if (!input.agentId && missionDoneHere(mm)) return { deny: `orc status: mission v${mm.version} in ${mm.repo} is finished. To continue it under orc call mcp__orc__continue {request} with the owner's words (no new gates); /orc backlog next starts a different goal. Never orchestrate by hand.` }
+      if (!input.agentId && missionDoneHere(mm)) return { deny: `orc status: mission v${mm.version} in ${mm.repo} is finished.${mm.outcome?.lines?.length ? `\n${mm.outcome.lines.join('\n')}\n` : ' '}To continue it under orc call mcp__orc__continue {request} with the owner's words (no new gates); /orc backlog next starts a different goal. Never orchestrate by hand.` }
       return { deny: 'orc status: only an orchestrator (agent, or the main session while it runs an approved mission) may pull status' }
     }
     const now = await $.clock.now()
@@ -3401,7 +3557,9 @@ export const register: Register = on => {
     if (!hit) return { deny: `orc mark: no child matches "${taskId}" (ids: ${mine.map(a => a.id.slice(0, 7) + ' "' + short(a.description, 24) + '"').join(', ')})` }
     if (hit.status === 'running' || hit.status === 'pending') return { deny: `orc mark: ${hit.id.slice(0, 7)} is still running; mark it after it returns` }
     const at = await $.clock.now()
-    await patchAgent($, hit.id, a => ({ ...a, mark: { verdict: verdict as 'accepted' | 'rejected' | 'redo', note: short(noteText, 300), at, by: caller && caller.id !== hit.parentId ? caller.id : undefined } }))
+    // WO-0220c: every mark is kept (redo, then accepted after the re-run); `mark` stays the latest for existing readers.
+    const newMark = { verdict: verdict as 'accepted' | 'rejected' | 'redo', note: short(noteText, 300), at, by: caller && caller.id !== hit.parentId ? caller.id : undefined }
+    await patchAgent($, hit.id, a => ({ ...a, mark: newMark, marks: [...markHistory(a), newMark].slice(-50) }))
     await note($, { kind: 'note', agentId: hit.id, text: `mark ${verdict}: ${short(noteText, 60)}` })
     // The projection must reflect every state change, not only wakes (mission 3, B7): rewrite it now.
     if (hit.parentId) {
@@ -3410,7 +3568,7 @@ export const register: Register = on => {
     let text = `marked ${hit.id.slice(0, 7)} "${short(hit.description, 40)}" as ${verdict} at ${new Date(at).toISOString()}`
     if (verdict === 'accepted' && hit.worktree && !hit.worktree.merged) {
       const res = await mergeClone($, hit.worktree)
-      await patchAgent($, hit.id, a => ({ ...a, worktree: a.worktree ? { ...a.worktree, merged: res.merged, mergeNote: res.note } : a.worktree }))
+      await patchAgent($, hit.id, a => ({ ...a, worktree: a.worktree ? { ...a.worktree, merged: res.merged, mergeNote: res.note, mergeSha: res.sha } : a.worktree }))
       await note($, { kind: 'note', agentId: hit.id, text: `merge ${res.merged}: ${short(res.note, 60)}` })
       text += res.merged === 'merged' ? ` · MERGED ${hit.worktree.branch} into ${hit.worktree.base} (${res.note})` : res.merged === 'nothing' ? ` · NOTHING TO MERGE: ${res.note}` : ` · MERGE ${res.merged.toUpperCase()}: ${res.note}`
       // Pruning: a merged (or empty) clone has nothing left to give; a conflict keeps its checkout for inspection.
@@ -3441,6 +3599,8 @@ export const register: Register = on => {
         text += ` · snapshot ${pr}`
       }
     }
+    // The numbers: a mark and a merge are events the repository ledger records (best effort).
+    if (hit.parentId) await repoLedgerWrite($, { orchId: hit.parentId })
     return { result: text }
   })
 
@@ -3562,7 +3722,7 @@ export const register: Register = on => {
         const block = await inboxContextFor($)
         if (block) return { ...ran, context: [...(ran.context ?? []), block] } as typeof ran
       } catch (err) {
-        $.ui.log(`orc: inbox context attach failed: ${String(err)}`, { to: 'debug' })
+        $.ui.log(`inbox context attach failed: ${String(err)}`, { to: 'debug' })
       }
     }
     return ran
@@ -3807,7 +3967,7 @@ export const register: Register = on => {
       const version = prev && prev.repo === repo ? prev.version + 1 : 1
       const seed: OrcUnderstanding = { mission: { statement: '', deliverables: [] }, finalPicture: { summary: '', criteria: [], constraints: [], exclusions: [] }, plan: { nodes: [] }, team: { roles: [] }, executionPolicy: { model: 'inherit', maxAgents: 3, maxAttemptsPerNode: 2, maxDurationMinutes: 120, allowedEffects: ['local_read', 'local_write'], materialChangeRule: '' }, executionTarget: { kind: 'git_repository', repositoryPath: repo, allowedPaths: [] }, sourceEvidence: { originalRequest: request, items: [{ id: 'e1', text: request, classification: 'supplied', role: 'context', source: 'owner, /orc begin' }], coverage: [] }, openQuestions: [] }
       const mode = /(?:^|\s)mode=subagent(?:\s|$)/.test(rest) ? 'subagent' : 'main'
-      const next: OrcMission = { repo, dir: missionDir(repo), version, status: 'drafting', mode, understanding: seed, findings: ['(seed only: draft the package)'], decisions: [], updatedAt: at }
+      const next: OrcMission = { repo, dir: missionDir(repo), version, status: 'drafting', mode, understanding: seed, findings: ['(seed only: draft the package)'], decisions: [], beganAt: at, updatedAt: at }
       await update($, missionState, () => next); await persistMission($, next)
       await inboxPush($, { kind: 'notice', text: `orc intake (automatic): the owner opened intake v${version} for ${repo} with /orc begin; their request and the drafting contract are in the command output above. Start the interview now: restate the request, say what you are unsure about, and ask your first question.` })
       return { text: `orc: intake v${version} opened for ${repo} (orchestrator: ${mode === 'main' ? 'this session' : 'a subagent'}). Original request recorded.\n\n${await ownerContext($, repo)}\n\nNow interview the owner: ask only material questions, then draft with mcp__orc__draft_understanding.` }
@@ -3929,8 +4089,17 @@ export const register: Register = on => {
           .join('\n'),
       }
     }
+    if (arg === 'status') {
+      // The same four lines the mcp__orc__status tool prints on a finished mission; the live PROVED line while it runs.
+      const mm = await read($, missionState)
+      if (missionDoneHere(mm) && mm.outcome?.version === mm.version && mm.outcome.lines?.length) return { text: mm.outcome.lines.join('\n') }
+      const live = await liveLedgerLine($)
+      const opened = await openPane($)
+      return { text: `${live ? `${live.text}\n` : ''}${opened.isPlaced ? 'pane open.' : `pane not placed (${opened.reason}).`}` }
+    }
+    // The engine leads a slash result with the plugin's name: no "orc: " of our own (proof 2 printed "orc: orc: pane open.").
     const opened = await openPane($)
-    return { text: opened.isPlaced ? 'orc: pane open.' : `orc: pane not placed (${opened.reason}).` }
+    return { text: opened.isPlaced ? 'pane open.' : `pane not placed (${opened.reason}).` }
   })
 
   // ---- drawing ------------------------------------------------------------------
@@ -3974,6 +4143,11 @@ export const register: Register = on => {
     const sbStatus = mis?.understanding?.plan?.nodes?.length ? await sandboxStatusCached($, mis.repo) : undefined
     const gateIs1 = mis?.status === 'understanding_requested'
     const gateName = gateIs1 ? 'understanding' : 'permission'
+    // The numbers beside the reading: while the mission runs, the live PROVED line (yellow when the stage so far ran no
+    // registered check); at done, the four lines. The last written ledger version is used when it is this mission's,
+    // so a resumed session shows the accumulated numbers; otherwise the session's own records are projected.
+    const live = await liveLedgerLine($)
+    const doneLines = mis && mis.status === 'done' && mis.outcome?.version === mis.version ? mis.outcome.lines : []
     return (
       <Box flexDirection="column">
         {gatePending && mis?.understanding ? (
@@ -4095,6 +4269,10 @@ export const register: Register = on => {
                 {'  '}{mis.understanding.finalPicture.criteria.length} criteria · {(mis.understanding.plan?.nodes ?? []).length} nodes · {mis.understanding.finalPicture.exclusions.length} exclusions · {mis.findings.length} findings · {(mis.understanding.openQuestions ?? []).length} open questions
               </Text>
             ) : null}
+            {live ? (live.warn ? <Text color="yellow" wrap="truncate">{'  '}{live.text}</Text> : <Text wrap="truncate">{'  '}{live.text}</Text>) : null}
+            {doneLines.map((l, i) => (
+              <Text key={`done-${i}`} bold={i === 0} wrap="truncate">{'  '}{l}</Text>
+            ))}
             {mis.status === 'understanding_requested' && mis.understanding ? (
               <Box flexDirection="column">
                 <Text dimColor wrap="truncate">{'  '}you said: {short(mis.understanding.sourceEvidence.originalRequest, width - 12)}</Text>

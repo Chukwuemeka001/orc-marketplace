@@ -47,6 +47,7 @@ description: Orchestration substrate for Claude Code (the orc plugin). Use when 
   binding: finish the current step, act on each item once (never spawn a second agent with the same description if
   `mcp__orc__status` shows it running), then continue. Never spawn a verifier or integrator unprompted.
 - Write the final report as a PENDING draft before the final verification; flip the status only after a pass.
+- You never count and never write a PROVED figure: the substrate's numbers are in `<repo>/ops/orc/LEDGER.md`, and it stamps the `NUMBERS:` and `PROVED (ledger):` lines of your reports itself at each verification request and at settle. `ops/FINAL.md` starts with `STATUS:`, `READING:` and `NUMBERS: ops/orc/LEDGER.md` and has a `## Numbers` section with a `CLAIMED (reports):` line (a child's figure, naming its report file) and a `READ:` line (your sentence), or the final request is refused; `CHECKPOINT-n.md` carries `NUMBERS:` too. Elsewhere in a report do not restate measurements: point to the ledger, and label a child's figure CLAIMED with its report named. At done the owner reads four lines (status · PROVED · READ · ledger).
 - Auto mode (optional): when a Workbench brief exists (or you write one), hand it to the substrate with
   `mcp__orc__run_graph {brief}`. It runs builders, checks, verifiers, merges and same-builder retries by the brief's
   policy, and pings you ("[orc graph]") only by that policy: an exhausted node, a gate reached, the graph done. Look
