@@ -55,3 +55,29 @@ export const SAFE_BROWSER_TOOLS = ['browser_navigate', 'browser_navigate_back', 
 export const UNSAFE_BROWSER_TOOLS = ['browser_run_code_unsafe', 'browser_file_upload', 'browser_drop'].map(t => `mcp__${BROWSER_SERVER}__${t}`)
 /** May orc approve this browser call without a dialog? Only a listed safe tool. */
 export const browserCallAllowed = (tool: string) => SAFE_BROWSER_TOOLS.includes(tool)
+
+/** The part of a mission the continue rule reads. */
+export type ContinueLike = { status?: string; mode?: string; version?: number; understanding?: unknown; missionFile?: string; dir?: string } | null | undefined
+/** Why /orc continue is refused, or undefined when it may go ahead: only a finished, main-mode mission with an approved
+ *  understanding continues, and only with a request. */
+export function continueRefusal(m: ContinueLike, request: string): string | undefined {
+  if (!m) return 'orc continue: no mission in this session. Resume one first with /orc resume [repo], or start one with /orc begin <request>.'
+  if (!request.trim()) return 'orc continue: say what comes next, in your words: /orc continue <request>.'
+  if (m.status === 'running') return `orc continue: mission v${m.version} is still running; tell the orchestrator directly, or record a standing rule with /orc directive <text>.`
+  if (m.status !== 'done') return `orc continue: mission v${m.version} is in intake (${m.status}); answer the gates first.`
+  if (!m.understanding) return 'orc continue: this mission has no approved understanding; start with /orc begin <request>.'
+  if (m.mode === 'subagent') return `orc continue: this mission was orchestrated by a subagent; continue it with /orc start ${m.missionFile ?? `${m.dir}/MISSION.md`} fresh=1 amendment=<request>.`
+  return undefined
+}
+
+/** The system-prompt section while a finished mission is loaded in the session: the owner may ask for more, and the
+ *  answer is /orc continue, never orchestrating by hand (Emeka's NCLEX run, 2026-10-08: Phases 2–7 ran outside orc). */
+export function doneSection(m: { repo: string; version: number }): string {
+  return [
+    `# orc: the mission in ${m.repo} is finished (v${m.version})`,
+    'The orc plugin adds this section while a finished mission is loaded in this session. If the owner asks for more work on this repository, do not orchestrate by hand (no Agent calls for builders or verifiers, no commits that sweep staged files):',
+    '- more of the same mission (the next phase, "continue until done", a follow-up): call mcp__orc__continue {request: <their words>} FIRST. It carries the approved understanding, plan, rules and standing directives into a new version under orc (clones, checks, verifiers, merges and the pane come back; no new interview or gate) and hands you the working rules as the next prompt.',
+    '- a different goal: /orc backlog add <request> then /orc backlog next (a new intake with gates), or /orc begin <request>.',
+    '- questions, reports and reading need nothing: just answer.',
+  ].join('\n')
+}

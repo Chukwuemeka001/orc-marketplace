@@ -1,6 +1,6 @@
 // Smoke tests for what a stranger meets first. Run: claude plugin test <plugin-dir>
 import { test, expect, describe } from 'claude-code/testing'
-import { ownReadRoot, sweepsStage, shellMask, browserGranted, computerOf, sandboxSettingsFor, browserCallAllowed, SAFE_BROWSER_TOOLS, UNSAFE_BROWSER_TOOLS } from '../hooks/policy'
+import { ownReadRoot, sweepsStage, shellMask, browserGranted, computerOf, sandboxSettingsFor, browserCallAllowed, SAFE_BROWSER_TOOLS, UNSAFE_BROWSER_TOOLS, continueRefusal, doneSection } from '../hooks/policy'
 
 describe('outside the lab', () => {
   test('/orc demo is a lab feature', async ($) => {
@@ -115,5 +115,35 @@ describe('the browser tools a worker may hold', () => {
   })
   test('another server\'s tools are never approved by this rule', async () => {
     expect(browserCallAllowed('mcp__other__browser_navigate')).toBe(false)
+  })
+})
+
+describe('continuing a finished mission (/orc continue)', () => {
+  const done = { status: 'done', mode: 'main', version: 1, understanding: { mission: {} } }
+  test('a finished main-mode mission with a request continues', async () => {
+    expect(continueRefusal(done, 'Continue through the rest of the phases until this is done')).toBeUndefined()
+  })
+  test('no mission, no request', async () => {
+    expect(continueRefusal(null, 'more')).toContain('no mission')
+    expect(continueRefusal(done, '   ')).toContain('say what comes next')
+  })
+  test('a running mission is steered, not continued', async () => {
+    expect(continueRefusal({ ...done, status: 'running' }, 'more')).toContain('still running')
+  })
+  test('intake first, and a subagent-run mission goes through /orc start', async () => {
+    expect(continueRefusal({ ...done, status: 'permission_requested' }, 'more')).toContain('intake')
+    expect(continueRefusal({ ...done, understanding: undefined }, 'more')).toContain('no approved understanding')
+    expect(continueRefusal({ ...done, mode: 'subagent', missionFile: '/work/app/ops/orc/MISSION.md' }, 'more')).toContain('/orc start /work/app/ops/orc/MISSION.md')
+  })
+  test('the finished-mission section tells the orchestrator to continue under orc, never by hand', async () => {
+    const t = doneSection({ repo: '/work/app', version: 2 })
+    expect(t).toContain('/work/app')
+    expect(t).toContain('mcp__orc__continue')
+    expect(t).toContain('do not orchestrate by hand')
+    expect(t).toContain('/orc backlog')
+  })
+  test('/orc continue with no mission in the session says so', async ($) => {
+    const r = await $.command.run({ command: 'orc', args: 'continue add a --json flag' })
+    expect(r.text ?? '').toContain('no mission')
   })
 })

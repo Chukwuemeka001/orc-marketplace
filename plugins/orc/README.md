@@ -55,6 +55,21 @@ Measured on one mission with a hidden 15-test acceptance suite, the same model s
 | normal | 22 min | 17.0M | 15/15 |
 | auto | 22 min | 6.9M | 15/15 |
 
+## After the mission: continue it, or queue the next goal
+A mission ends when the orchestrator writes `ops/FINAL.md` with a status. If you then want more of the same work (the
+next phase, "carry on until it is done", a follow-up), say:
+```
+/orc continue <your request>
+```
+There is no new interview and no new gate: the understanding and rules you approved, your standing directives and the
+plan carry into the next version, your request is recorded as the amendment, and the builders, checks, verifiers,
+merges and the pane are back. The previous run's records move to `ops/history/`. Without this, a session that is asked
+for more after the final report carries on as plain Claude Code, with none of orc's protections (one 7-hour run spent
+its last 3 hours that way).
+
+For a different goal, queue it: `/orc backlog add <request>`, then `/orc backlog next` when the mission is done; that
+starts a new intake with its gates.
+
 ## What orc writes
 - **In your repository, `ops/`:**
   - `ops/orc/`: the mission state, the understanding you approved, and the plan;
@@ -109,6 +124,7 @@ Limits:
 | `/orc approve`, `/orc correct <note>`, `/orc defer` | answer a gate |
 | `/orc status` or `/orc` | the pane: agents, gates, the journal |
 | `/orc resume [repo]` | pick a mission up in a new session |
+| `/orc continue <request>` | continue a finished mission with your next request, under the approved rules, no new gates |
 | `/orc directive <text>` | record a standing rule for this mission |
 | `/orc backlog add <request>`, `/orc backlog next` | queue what comes next |
 | `/orc policy retry=N parallel=N ping=failures_only` | change a running graph's rules (auto mode) |

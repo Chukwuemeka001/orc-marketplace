@@ -71,7 +71,7 @@ workers that were not granted.
 Everything lives in `<repo>/ops/orc/` (state.json, UNDERSTANDING.md, MISSION.md) plus `ops/DECISIONS.md`, `ops/FINAL.md`.
 A new session in that repository is told a mission exists; `/orc resume` (or `mcp__orc__resume`) restores the intake at its
 gate, or makes this session the orchestrator again with the snapshot's children adopted and a delta of what is pending.
-`/orc backlog add <request>` queues the next goal; `/orc backlog next` starts its intake once the current mission is done.
+`/orc backlog add <request>` queues the next goal; `/orc backlog next` starts its intake once the current mission is done. `/orc continue <request>` continues a FINISHED mission with the owner's next request under the approved rules (no new interview or gate; clones, checks, verifiers and the pane come back). After ops/FINAL.md, when the owner asks for more of the same work, call mcp__orc__continue first; never orchestrate by hand.
 
 ## Other commands
 `/orc start <mission.md> [archive=1|fresh=1]` runs a hand-written mission instead of an interview. `/orc understanding`

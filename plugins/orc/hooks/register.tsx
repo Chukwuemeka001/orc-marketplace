@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import { ownReadRoot, shellMask, sweepsStage, browserGranted, computerOf, sandboxSettingsFor, SAFE_BROWSER_TOOLS, UNSAFE_BROWSER_TOOLS, browserCallAllowed } from './policy'
+import { ownReadRoot, shellMask, sweepsStage, browserGranted, computerOf, sandboxSettingsFor, SAFE_BROWSER_TOOLS, UNSAFE_BROWSER_TOOLS, browserCallAllowed, continueRefusal, doneSection } from './policy'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { OrcActivity, OrcAgent, OrcBucket, OrcClass, OrcCompaction, OrcDemo, OrcEntry, OrcGraph, OrcGraphNode, OrcInboxItem, OrcMission, OrcTurn, OrcUnderstanding } from '../types'
@@ -778,6 +778,7 @@ function renderUnderstanding(m: OrcMission): string {
   if (m.decisions.length) L.push('', '## Owner decisions', ...m.decisions.map(d => `- ${iso(d.at)} ${d.gate === 'permission' ? 'plan & rules' : d.gate}: ${d.choice}${d.note ? ` — ${d.note}` : ''}`))
   if (m.snapshot) L.push('', `## Progress (snapshot ${iso(m.snapshot.at)})`, ...m.snapshot.children.map(c => `- ${c.id.slice(0, 7)} ${c.type.replace('orc:', '')} "${short(c.description, 40)}": ${c.status}${c.mark ? ` · ${c.mark}` : ''}${c.merged ? ` · ${c.merged}` : ''}`), `verifications: ${m.snapshot.verifyRequests.map(v => v.stage).join(', ') || 'none'} · integration runs: ${m.snapshot.integrationRuns.map(r => r.status).join(', ') || 'none'}`)
   if (m.backlog?.length) L.push('', '## Backlog', ...m.backlog.map(b => `- [${b.status}] ${b.id}: ${short(b.request, 80)}`))
+  if (m.continuations?.length) L.push('', '## Continuations (the owner continued the finished mission; each is the amendment and the approval of its version)', ...m.continuations.map(c => `- v${c.version} ${iso(c.at)} (previous final: ${c.previousFinal ?? 'none'}): ${short(c.request, 160)}`))
   return L.join('\n') + '\n'
 }
 
@@ -918,14 +919,7 @@ async function launchApprovedMission($: EngineInterface): Promise<string> {
   const m = await read($, missionState)
   if (!m || m.status !== 'approved' || !m.understanding) return 'orc: nothing approved to launch.'
   const dir = missionDir(m.repo)
-  const isRepo = (await $.process.run(['git', '-C', m.repo, 'rev-parse', 'HEAD'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1 }))).exitCode === 0
-  if (isRepo && (await $.fs.exists(`${m.repo}/ops/DECISIONS.md`))) {
-    const d = new Date(await $.clock.now())
-    const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`
-    const cmd = `cd "${m.repo}" && mkdir -p ops/history/${stamp} && for f in DECISIONS.md CONTRACTS.md CHECKPOINT-1.md FINAL.md SCORE.md work-orders; do [ -e "ops/$f" ] && git mv -k "ops/$f" "ops/history/${stamp}/" 2>/dev/null || { [ -e "ops/$f" ] && mv "ops/$f" "ops/history/${stamp}/"; }; done; git add ops/history ops/DECISIONS.md ops/CONTRACTS.md ops/CHECKPOINT-1.md ops/FINAL.md ops/SCORE.md ops/work-orders 2>/dev/null; git commit -q -m "orc: archive previous run to ops/history/${stamp}" 2>/dev/null; true`
-    await $.process.run(['/bin/sh', '-c', cmd], { timeoutMs: 60000 })
-    try { await $.process.run(['/bin/sh', '-c', `rm -rf "${m.repo}-wt" && git -C "${m.repo}" worktree prune`], { timeoutMs: 30000 }) } catch { /* best effort */ }
-  }
+  await archivePreviousRun($, m.repo)
   // orc creates the repository itself: its own commands run outside Claude Code's sandbox, which (rightly) refuses a
   // sandboxed `git init` (.git/config and .git/hooks are protected). Commits after that are fine inside the sandbox.
   try {
@@ -964,22 +958,7 @@ async function launchApprovedMission($: EngineInterface): Promise<string> {
   // The orc computer: when gate 2 granted workers a browser, orc proves that browser now (a local page at 375 px), so a
   // broken browser surfaces while the owner is here.
   const webRoles = ['builder', 'verifier'].filter(r => browserGranted(m, r))
-  let computer = ''
-  if (webRoles.length) {
-    const server = browserServer()
-    if (!server) computer = `\n\nORC COMPUTER: gate 2 granted a browser to ${webRoles.join(' and ')}s, but no browser is configured for orc (config "browser"). Tell the owner before dispatching; checks that need it cannot run.`
-    else {
-      let res: { ok?: boolean; tools?: number; width?: number | null; error?: string } = {}
-      try {
-        const r = await $.process.run(['node', `${PLUGIN_ROOT}/bin/browser-check.mjs`, JSON.stringify(server)], { timeoutMs: 180000 })
-        res = JSON.parse(r.stdout.trim().split('\n').pop() ?? '{}')
-      } catch (err) { res = { ok: false, error: String(err) } }
-      await note($, { kind: 'note', text: `orc computer browser check: ${res.ok ? `ok (${res.tools} tools, ${res.width}px)` : `FAILED: ${short(res.error ?? '', 80)}`}` })
-      computer = res.ok
-        ? `\n\nORC COMPUTER: orc started the mission browser and opened a local page at ${res.width}px: it works. ${webRoles.map(r => `${r === 'builder' ? 'Builders' : 'Verifiers'} that need it run as orc:${r}-web`).join('; ')} (verifiers are dispatched that way for you; dispatch a builder whose step needs the browser as orc:builder-web, the others as orc:builder). It opens local pages only; you need not try it yourself.`
-        : `\n\nORC COMPUTER: the mission browser did NOT start: ${short(res.error ?? '', 200)}. Tell the owner now, before dispatching; checks that need it cannot run.`
-    }
-  }
+  const computer = await computerLaunchNote($, m)
   const ownCaps = caps.filter(c => !(webRoles.length && BROWSER && /browser|chrom|viewport|playwright/i.test(c.need)))
   const frontLoad = ownCaps.length ? `\n\nFIRST, before dispatching anything, while the owner is still here: use each approved tool once, in this turn, the way the work will use it (${ownCaps.map(c => c.need).join('; ')}), so any permission prompt comes now and not in the middle of the run. Then tell the owner in one line that setup is done and they can step away. If a permission is refused, stop and say what it blocks. For page checks, serve the page locally (http://localhost) and check it there; never open an outside site to work around a tool limit.` : ''
   await inboxPush($, { kind: 'notice', text: `orc mission (automatic): the owner approved the work.${computer}${frontLoad} ${rules}\n\nMain-session specifics: ${mainSpecifics(m.understanding.executionPolicy.maxAgents)}` })
@@ -1000,6 +979,8 @@ const ORC_LOOP_TOOLS = ['mcp__orc__mark', 'mcp__orc__steer', 'mcp__orc__request_
 const ORC_INTAKE_TOOLS = ['mcp__orc__owner_context', 'mcp__orc__draft_understanding', 'mcp__orc__request_understanding', 'mcp__orc__request_permission']
 const INTAKE_STATES = ['drafting', 'understanding_requested', 'understood', 'permission_requested']
 const mainMissionLive = (m: OrcMission | null | undefined): m is OrcMission => !!m && m.status === 'running' && m.mode === 'main'
+/** A finished mission loaded in this session (orchestrated here, or resumed): the owner may ask for more; /orc continue keeps it under orc. */
+const missionDoneHere = (m: OrcMission | null | undefined): m is OrcMission => !!m && m.status === 'done' && m.mode !== 'subagent' && !!m.understanding
 let pinKey = ''
 /** Lab: compaction threshold from config (applies to any main-mode mission; the orchestrator never sees it). */
 let LAB_COMPACT_AT: number | undefined
@@ -1007,7 +988,7 @@ let LAB_MAX_COMPACTIONS = 2
 let briefNoted: number | undefined
 /** Re-describe the orc tools when the pinned set changes (a tool-list change spends the prompt cache once). */
 function refreshPins($: EngineInterface, m: OrcMission | null | undefined) {
-  const key = `${mainMissionLive(m)}|${!!m && INTAKE_STATES.includes(m.status)}`
+  const key = `${mainMissionLive(m)}|${!!m && INTAKE_STATES.includes(m.status)}|${missionDoneHere(m)}`
   if (key === pinKey) return
   pinKey = key
   try { $.ui.invalidate('tool.describe') } catch { /* older engine */ }
@@ -1675,7 +1656,7 @@ async function resumeMission($: EngineInterface, repoGiven?: string): Promise<st
   const directives = (m.directives ?? []).slice(-5).map(d => `- ${iso(d.at)} ${d.text}`).join('\n')
   if (m.status === 'done') {
     const bl = (m.backlog ?? []).filter(b => b.status === 'queued')
-    return `${head}\nThis mission is finished (${m.snapshot ? `${m.snapshot.children.length} children, ${m.snapshot.children.filter(c => c.merged === 'merged').length} merges` : 'no snapshot'}). Final report: ${repo}/ops/FINAL.md.${bl.length ? `\nBacklog has ${bl.length} queued item(s); start the next with /orc backlog next.` : '\nBacklog is empty; add the next request with /orc backlog add <request> or start a new intake with /orc begin <request>.'}${directives ? `\nStanding directives:\n${directives}` : ''}`
+    return `${head}\nThis mission is finished (${m.snapshot ? `${m.snapshot.children.length} children, ${m.snapshot.children.filter(c => c.merged === 'merged').length} merges` : 'no snapshot'}). Final report: ${repo}/ops/FINAL.md. Continue it under orc with /orc continue <request> (same rules, no new gates).${bl.length ? `\nBacklog has ${bl.length} queued item(s); start the next with /orc backlog next.` : '\nBacklog is empty; add the next request with /orc backlog add <request> or start a new intake with /orc begin <request>.'}${directives ? `\nStanding directives:\n${directives}` : ''}`
   }
   if (m.status !== 'running') {
     openPane($)
@@ -1751,6 +1732,89 @@ async function backlogOp($: EngineInterface, action: 'list' | 'add' | 'next', re
   return `orc backlog: started ${nextItem.id} as mission v${next.version} (intake, stage 1). Original request recorded.\n\n${await ownerContext($, m.repo)}\n\nInterview the owner now (restate, then one question at a time with options).`
 }
 
+/** A previous run's ops files go to ops/history/<stamp>/ (committed), and its clones are removed. */
+async function archivePreviousRun($: EngineInterface, repo: string) {
+  const isRepo = (await $.process.run(['git', '-C', repo, 'rev-parse', 'HEAD'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1 }))).exitCode === 0
+  if (isRepo && (await $.fs.exists(`${repo}/ops/DECISIONS.md`))) {
+    const d = new Date(await $.clock.now())
+    const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`
+    const cmd = `cd "${repo}" && mkdir -p ops/history/${stamp} && for f in DECISIONS.md CONTRACTS.md CHECKPOINT-1.md FINAL.md SCORE.md work-orders; do [ -e "ops/$f" ] && git mv -k "ops/$f" "ops/history/${stamp}/" 2>/dev/null || { [ -e "ops/$f" ] && mv "ops/$f" "ops/history/${stamp}/"; }; done; git add ops/history ops/DECISIONS.md ops/CONTRACTS.md ops/CHECKPOINT-1.md ops/FINAL.md ops/SCORE.md ops/work-orders 2>/dev/null; git commit -q -m "orc: archive previous run to ops/history/${stamp}" 2>/dev/null; true`
+    await $.process.run(['/bin/sh', '-c', cmd], { timeoutMs: 60000 })
+    try { await $.process.run(['/bin/sh', '-c', `rm -rf "${repo}-wt" && git -C "${repo}" worktree prune`], { timeoutMs: 30000 }) } catch { /* best effort */ }
+  }
+}
+
+/** The orc computer at launch: when gate 2 granted workers a browser, orc proves that browser now (a local page at 375 px),
+ *  so a broken browser surfaces while the owner is here. Returns the note for the orchestrator (empty when no browser was granted). */
+async function computerLaunchNote($: EngineInterface, m: OrcMission): Promise<string> {
+  const webRoles = ['builder', 'verifier'].filter(r => browserGranted(m, r))
+  let computer = ''
+  if (webRoles.length) {
+    const server = browserServer()
+    if (!server) computer = `\n\nORC COMPUTER: gate 2 granted a browser to ${webRoles.join(' and ')}s, but no browser is configured for orc (config "browser"). Tell the owner before dispatching; checks that need it cannot run.`
+    else {
+      let res: { ok?: boolean; tools?: number; width?: number | null; error?: string } = {}
+      try {
+        const r = await $.process.run(['node', `${PLUGIN_ROOT}/bin/browser-check.mjs`, JSON.stringify(server)], { timeoutMs: 180000 })
+        res = JSON.parse(r.stdout.trim().split('\n').pop() ?? '{}')
+      } catch (err) { res = { ok: false, error: String(err) } }
+      await note($, { kind: 'note', text: `orc computer browser check: ${res.ok ? `ok (${res.tools} tools, ${res.width}px)` : `FAILED: ${short(res.error ?? '', 80)}`}` })
+      computer = res.ok
+        ? `\n\nORC COMPUTER: orc started the mission browser and opened a local page at ${res.width}px: it works. ${webRoles.map(r => `${r === 'builder' ? 'Builders' : 'Verifiers'} that need it run as orc:${r}-web`).join('; ')} (verifiers are dispatched that way for you; dispatch a builder whose step needs the browser as orc:builder-web, the others as orc:builder). It opens local pages only; you need not try it yourself.`
+        : `\n\nORC COMPUTER: the mission browser did NOT start: ${short(res.error ?? '', 200)}. Tell the owner now, before dispatching; checks that need it cannot run.`
+    }
+  }
+  return computer
+}
+
+/** Continue a finished mission with the owner's next request: no new interview or gate. The approved understanding,
+ *  plan, rules and standing directives carry into version+1; the request is the amendment and the approval; the previous
+ *  run's ops files go to ops/history/; the main session is the orchestrator again with the whole substrate. (Emeka's
+ *  NCLEX run, 2026-10-08: Phase 1 settled the mission and Phases 2–7 ran by hand: no clones, checks, gates or pane,
+ *  48 raw notification turns, two commit sweeps.) */
+async function continueMission($: EngineInterface, request: string): Promise<string> {
+  const m = await read($, missionState)
+  const refusal = continueRefusal(m, request)
+  if (refusal || !m?.understanding) return refusal ?? 'orc continue: no approved understanding.'
+  const u = m.understanding
+  const at = await $.clock.now()
+  const finalPath = `${m.repo}/ops/FINAL.md`
+  let previousFinal: string | undefined
+  try { previousFinal = /^STATUS:.*$/m.exec(await $.fs.read(finalPath))?.[0] } catch { /* no final report */ }
+  await archivePreviousRun($, m.repo)
+  const dir = missionDir(m.repo)
+  const version = m.version + 1
+  const req = request.trim()
+  const missionPath = `${dir}/MISSION.md`
+  const base: OrcMission = { ...m, version, status: 'running', mode: 'main', startedAt: at, missionFile: missionPath, snapshot: undefined, editUnlocked: undefined, brief: undefined, graph: undefined, rulesPath: undefined,
+    decisions: [...m.decisions, { at, gate: 'continue', choice: 'approve', note: short(req, 200) }],
+    continuations: [...(m.continuations ?? []), { at, version, request: req, previousFinal }], updatedAt: at }
+  await $.fs.write(missionPath, missionFileFrom(base) + `\n## Continuation (v${version}, ${iso(at)})\nThe owner continued the finished mission (previous final: ${previousFinal ?? 'none'}) with this request, which is the amendment and the approval:\n\n${req}\n`)
+  const row: OrcAgent = { id: MAIN_ORCH, type: 'orc:orchestrator', description: `orchestrator (main session, continued v${version}): ${short(req, 60)}`, status: 'running', startedAt: at, toolCalls: 0, toolErrors: 0, promptChars: 0, steps: 0, modelMs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, classes: {}, activities: {}, tools: [], outProseChars: 0, outThinkChars: 0, outArgChars: 0, ctxTokens: 0, ctxMax: 0, ctxFirst: 0, children: 0, runs: 1 }
+  await update($, agents, map => ({ ...(map ?? {}), [MAIN_ORCH]: row }))
+  await update($, missionState, () => base)
+  await persistMission($, base)
+  await note($, { kind: 'spawn', agentId: MAIN_ORCH, text: `mission continued as v${version}: ${short(req, 50)}` })
+  const auto = u.executionPolicy?.mode === 'auto'
+  const rules = mainRules(missionPath, m.repo, req, finalPath) + (auto ? autoModeRules(workbenchDir()) : '')
+  const rulesPath = `${OUT_DIR}/mission-${at}.rules.md`
+  try { await $.fs.write(rulesPath, rules) } catch { /* best effort */ }
+  const acct = await promptAccounting($)
+  const withRules: OrcMission = { ...base, rulesPath, brief: { chars: orchestratorBrief({ ...base, rulesPath }).length, renders: [], spBefore: acct.sp, window: acct.window, windowSource: acct.windowSource } }
+  await update($, missionState, () => withRules)
+  await persistMission($, withRules)
+  const computer = await computerLaunchNote($, withRules)
+  const prev = m.snapshot ? `${m.snapshot.children.length} children, ${m.snapshot.children.filter(c => c.merged === 'merged').length} merged` : 'no snapshot'
+  const delta = [
+    `[orc continue] mission v${m.version} was finished (${previousFinal ?? 'no FINAL status'}; ${prev}); its ops files are now in ops/history/. The owner continues it as v${version} with this request, recorded as the amendment and the approval (no new interview, no new gate):`,
+    `"${req}"`,
+    `The approved understanding, plan, rules and standing directives stand (${dir}/UNDERSTANDING.md; mission file ${missionPath}). Plan the continuation from the request and the approved plan: work orders keep the plan's node ids where they apply and take new ones for new steps; every builder goes through the substrate (clones, checks, boundaries, marks, merges); request a checkpoint verifier at the end of each phase; write ${finalPath} (STATUS: PASS or FAIL, never PENDING) only when the request is complete. The mission settles again then, and the owner can continue it again.`,
+    auto ? 'The previous graph is finished: write a new Workbench brief for the continuation and hand it to mcp__orc__run_graph.' : '',
+  ].filter(Boolean).join('\n')
+  await inboxPush($, { kind: 'notice', text: `orc mission (automatic, continued): ${delta}${computer}\n\n${rules}\n\nMain-session specifics: ${mainSpecifics(u.executionPolicy.maxAgents)}` })
+  return `orc continue: mission v${m.version} → v${version} for ${m.repo}. The main session is the orchestrator again under the approved rules; clones, checks, verifiers, merges and the pane are back. The owner's request and the working rules arrive as the next prompt.`
+}
+
 /** A running mission settles to done once its final report is committed with a non-PENDING status and no orc agent is live. */
 async function settleMission($: EngineInterface) {
   const m = await read($, missionState)
@@ -1773,7 +1837,7 @@ async function settleMission($: EngineInterface) {
   const started = (next.backlog ?? []).find(b => b.status === 'started')
   if (started) { const n2: OrcMission = { ...next, backlog: next.backlog!.map(b => b.id === started.id ? { ...b, status: 'done' } : b) }; await update($, missionState, () => n2); await persistMission($, n2) }
   await note($, { kind: 'note', agentId: 'owner', text: `mission v${m.version} done: ${short(status, 60)}` })
-  $.ui.toast(`orc: mission v${m.version} done — ${short(status, 60)}`)
+  $.ui.toast(`orc: mission v${m.version} done — ${short(status, 60)} · /orc continue <request> keeps going under orc`)
 }
 
 /** Process one due integration run (set by a merge): run the registered script if it exists, otherwise have the integrator write it. */
@@ -2485,6 +2549,7 @@ export const register: Register = on => {
     const r = await next(e)
     if (e.name !== 'env_info_simple') return r
     const m = await read($, missionState)
+    if (missionDoneHere(m)) return { text: `${r.text ?? ''}\n\n${doneSection(m)}` }
     if (!mainMissionLive(m) || !mainOrch((await read($, agents)) ?? {})) return r
     const brief = orchestratorBrief(m)
     if (briefNoted !== m.startedAt) { briefNoted = m.startedAt; await note($, { kind: 'note', agentId: MAIN_ORCH, text: `orchestrator brief rendered into the system prompt (${brief.length} chars)` }) }
@@ -2536,7 +2601,7 @@ export const register: Register = on => {
     const r = await next(e)
     if (!e.tool.startsWith('mcp__orc__')) return r
     const m = await read($, missionState)
-    const pin = (ORC_LOOP_TOOLS.includes(e.tool) && mainMissionLive(m)) || (ORC_INTAKE_TOOLS.includes(e.tool) && !!m && INTAKE_STATES.includes(m.status))
+    const pin = (ORC_LOOP_TOOLS.includes(e.tool) && mainMissionLive(m)) || (ORC_INTAKE_TOOLS.includes(e.tool) && !!m && INTAKE_STATES.includes(m.status)) || (e.tool === 'mcp__orc__continue' && missionDoneHere(m))
     return pin ? { ...r, isDeferred: false } : r
   })
 
@@ -2561,8 +2626,8 @@ export const register: Register = on => {
     try {
       await $.command.register({
       name: 'orc',
-      description: 'orc: `begin <request>` opens the owner intake (interview → gate 1 understanding → gate 2 plan & rules → run); `approve|correct <note>|defer` answer a pending gate; `resume [repo]` picks a mission up from the repository state; `allow-edit|lock-edit` override/restore the plugin edit lock while a mission runs; `directive <text>` records a standing owner rule; `backlog [add <request>|next]`; `understanding` prints the package; `policy retry=N parallel=N ping=…` tunes a running graph (auto mode); `computer [on|off]` shows or sets the mission computer (sandbox, browser, network); `start <mission.md> [repo=<path>] [amendment=<path>] [final=<path>]` starts a mission from a file; `status`; or the pane / `turns`, `agents`, `journal`, `export`, `clear`',
-      argumentHint: '[begin <request>|approve|correct <note>|defer|resume [repo]|directive <text>|backlog [add|next]|understanding|policy ...|computer [on|off]|start <mission.md> ...|status|turns|agents|journal|export|clear]',
+      description: 'orc: `begin <request>` opens the owner intake (interview → gate 1 understanding → gate 2 plan & rules → run); `approve|correct <note>|defer` answer a pending gate; `resume [repo]` picks a mission up from the repository state; `allow-edit|lock-edit` override/restore the plugin edit lock while a mission runs; `directive <text>` records a standing owner rule; `continue <request>` continues a finished mission with the next request under the approved rules (no new gates); `backlog [add <request>|next]`; `understanding` prints the package; `policy retry=N parallel=N ping=…` tunes a running graph (auto mode); `computer [on|off]` shows or sets the mission computer (sandbox, browser, network); `start <mission.md> [repo=<path>] [amendment=<path>] [final=<path>]` starts a mission from a file; `status`; or the pane / `turns`, `agents`, `journal`, `export`, `clear`',
+      argumentHint: '[begin <request>|approve|correct <note>|defer|resume [repo]|continue <request>|directive <text>|backlog [add|next]|understanding|policy ...|computer [on|off]|start <mission.md> ...|status|turns|agents|journal|export|clear]',
       })
     } catch (err) {
       // A user skill or another plugin may own /orc; the substrate must still load (tools, agent types, hooks).
@@ -2618,6 +2683,7 @@ export const register: Register = on => {
       { name: 'graph_decide', description: 'Auto mode: answer a graph ping. retry = one more attempt for a failed node (your note is sent as the fix); skip = accept the gap and let dependents start; abort = start nothing new.', inputSchema: { type: 'object', properties: { node: { type: 'string' }, action: { type: 'string', enum: ['retry', 'skip', 'abort'] }, note: { type: 'string' } }, required: ['action'] } },
       { name: 'steer', description: 'Send one of your children a short steering message. A running child reads it with its next tool result; a finished child is resumed with it, its context intact, and reports again as a wake. Use it to correct course: a verifier about to fail work that is still being built, a builder misreading its order. It cannot widen a child\'s write boundary.', inputSchema: { type: 'object', properties: { taskId: { type: 'string', description: 'the child id (or its first 7 characters, or its description)' }, message: { type: 'string', description: 'one or two plain sentences' } }, required: ['taskId', 'message'] } },
       { name: 'backlog', description: 'The mission backlog in the repository state: list, add <request>, or next (start the next queued request as a new intake once the current mission is done).', inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'add', 'next'] }, request: { type: 'string' } }, required: ['action'] } },
+      { name: 'continue', description: 'Continue a FINISHED mission with the owner\'s next request, in their words (the next phase, "carry on until done", a follow-up). No new interview or gate: the approved understanding, plan, rules and standing directives carry into a new version under orc, with clones, checks, verifiers, merges and the pane; the request is recorded as the amendment and the approval. Use it instead of orchestrating by hand after ops/FINAL.md. Same as /orc continue <request>.', inputSchema: { type: 'object', properties: { request: { type: 'string', description: "the owner's request, verbatim" } }, required: ['request'] } },
     ]) {
       try { await $.tool.register(spec) } catch (err) { $.ui.log(`orc: tool.register ${spec.name} failed: ${String(err)}`) }
     }
@@ -3195,6 +3261,12 @@ export const register: Register = on => {
     if (typeof input.text !== 'string' || !input.text.trim()) return { deny: 'orc directive: text is required' }
     return { result: await addDirective($, input.text) }
   })
+  on('tool.call', { tool: 'mcp__orc__continue' }, async ($, e) => {
+    const input = e as unknown as { agentId?: string; request?: unknown }
+    if (input.agentId) return { deny: 'orc continue: main session only' }
+    return { result: await continueMission($, typeof input.request === 'string' ? input.request : '') }
+  })
+
   on('tool.call', { tool: 'mcp__orc__backlog' }, async ($, e) => {
     const input = e as unknown as { action?: unknown; request?: unknown; agentId?: string }
     if (input.agentId) return { deny: 'orc backlog: main session only' }
@@ -3223,7 +3295,11 @@ export const register: Register = on => {
     const input = e as unknown as { agentId?: string }
     const map = (await read($, agents)) ?? {}
     const orch = input.agentId ? map[input.agentId] : mainOrch(map)
-    if (!orch || !isLedgerType(orch.type)) return { deny: 'orc status: only an orchestrator (agent, or the main session while it runs an approved mission) may pull status' }
+    if (!orch || !isLedgerType(orch.type)) {
+      const mm = await read($, missionState)
+      if (!input.agentId && missionDoneHere(mm)) return { deny: `orc status: mission v${mm.version} in ${mm.repo} is finished. To continue it under orc call mcp__orc__continue {request} with the owner's words (no new gates); /orc backlog next starts a different goal. Never orchestrate by hand.` }
+      return { deny: 'orc status: only an orchestrator (agent, or the main session while it runs an approved mission) may pull status' }
+    }
     const now = await $.clock.now()
     const kids = kidsOf(map, orch).sort((a, b) => a.startedAt - b.startedAt)
     const running = kids.filter(a => a.status === 'running' || a.status === 'pending')
@@ -3750,6 +3826,7 @@ export const register: Register = on => {
     }
     if (/^resume\b/.test(argv)) return { text: await resumeMission($, argv.replace(/^resume\s*/, '').trim() || undefined) }
     if (/^directive\b/.test(argv)) { const t = argv.replace(/^directive\s*/, '').trim(); return { text: t ? await addDirective($, t) : 'orc directive: usage: /orc directive <text>' } }
+    if (/^continue\b/.test(argv)) return { text: await continueMission($, argv.replace(/^continue\s*/, '').trim()) }
     if (/^backlog\b/.test(argv)) {
       const rest = argv.replace(/^backlog\s*/, '').trim()
       if (/^add\s+/.test(rest)) return { text: await backlogOp($, 'add', rest.replace(/^add\s+/, '')) }

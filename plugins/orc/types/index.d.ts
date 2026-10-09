@@ -127,7 +127,7 @@ export type OrcUnderstanding = {
  *  another app, credentials): approved at gate 2, exercised once at the start so any permission prompt comes while the
  *  owner is present. */
 export type OrcCapability = { need: string; why: string; by: string; permission?: string }
-export type OrcDecision = { at: number; gate: 'understanding' | 'permission'; choice: 'approve' | 'correct' | 'defer'; note?: string }
+export type OrcDecision = { at: number; gate: 'understanding' | 'permission' | 'continue'; choice: 'approve' | 'correct' | 'defer'; note?: string }
 /** One item of the main-loop inbox: what the main session must know (wake) or do (spawn, notice); delivered through the
  *  tool-result door (mid-turn) or the prompt door (idle), acknowledged by evidence, redelivered until then. */
 export type OrcInboxItem = {
@@ -164,6 +164,8 @@ export type OrcMission = {
   computer?: { on: boolean; at: number; settingsPath: string }
   directives?: { at: number; text: string }[]
   backlog?: { id: string; request: string; at: number; status: 'queued' | 'started' | 'done' }[]
+  /** /orc continue: the owner's follow-on requests; each starts version+1 under the approved rules, no new gates */
+  continuations?: { at: number; version: number; request: string; previousFinal?: string }[]
   /** where the working rules were written at launch (the orchestrator brief points at it; it survives compaction) */
   rulesPath?: string
   /** lab options for a mission started from /orc demo or /orc start in main mode */
