@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.22.1 — 2026-10-10
+- Safety: starting a mission over a previous run (`/orc begin` on a repository that already holds one, `/orc start
+  --archive`) or `/orc continue` no longer deletes the `<repo>-wt` folder. The old run's clones are moved aside
+  (`<repo>-wt.prev-<stamp>`, or beside the moved repository as `<repo>.prev-<stamp>-wt`) and only stale worktree
+  entries are pruned; branches and any uncommitted work in a clone are kept. Found by an independent review.
+
 ## 0.22.0 — 2026-10-09
 - The numbers beside the reading. The substrate writes `ops/orc/LEDGER.md` (and `ledger.json`, the durable
   accumulator) in the mission's repository on every event: returns with their check and boundary audit, marks, merges,

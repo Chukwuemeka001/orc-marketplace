@@ -635,8 +635,9 @@ async function startMission($: EngineInterface, args: { mission: string; repo?: 
     const dest = `${repo}.prev-${stamp}`
     const mv = await $.process.run(['mv', repo, dest], { timeoutMs: 30000 })
     if (mv.exitCode !== 0) return `orc start: could not move ${repo} aside (${short(mv.stderr, 120)}). Nothing was started.`
-    // Clones and snapshots of the old run point at the old path: drop their checkouts (branches stay in the moved repo).
-    try { await $.process.run(['/bin/sh', '-c', `rm -rf "${repo}-wt" && git -C "${dest}" worktree prune`], { timeoutMs: 30000 }) } catch { /* best effort */ }
+    // Clones and snapshots of the old run point at the old path: move their folder beside the moved repo (never delete:
+    // a clone can hold uncommitted work), then prune the stale worktree entries (branches stay in the moved repo).
+    try { await $.process.run(['/bin/sh', '-c', `if [ -e "${repo}-wt" ] && [ ! -e "${dest}-wt" ]; then mv "${repo}-wt" "${dest}-wt"; fi; git -C "${dest}" worktree prune`], { timeoutMs: 30000 }) } catch { /* best effort */ }
     archived = ` Previous run moved to ${dest}.`
   }
   if (args.mode === 'main') return startMainLab($, { mission, repo, amendment, finalPath, compactAt: args.compactAt, maxAgents: args.maxAgents, archived, auto: args.auto })
@@ -1840,7 +1841,8 @@ async function archivePreviousRun($: EngineInterface, repo: string) {
     const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`
     const cmd = `cd "${repo}" && mkdir -p ops/history/${stamp} && for f in DECISIONS.md CONTRACTS.md CHECKPOINT-1.md FINAL.md SCORE.md work-orders; do [ -e "ops/$f" ] && git mv -k "ops/$f" "ops/history/${stamp}/" 2>/dev/null || { [ -e "ops/$f" ] && mv "ops/$f" "ops/history/${stamp}/"; }; done; git add ops/history ops/DECISIONS.md ops/CONTRACTS.md ops/CHECKPOINT-1.md ops/FINAL.md ops/SCORE.md ops/work-orders 2>/dev/null; git commit -q -m "orc: archive previous run to ops/history/${stamp}" 2>/dev/null; true`
     await $.process.run(['/bin/sh', '-c', cmd], { timeoutMs: 60000 })
-    try { await $.process.run(['/bin/sh', '-c', `rm -rf "${repo}-wt" && git -C "${repo}" worktree prune`], { timeoutMs: 30000 }) } catch { /* best effort */ }
+    // The old run's clones: move the folder aside (never delete: a clone can hold uncommitted work), then prune.
+    try { await $.process.run(['/bin/sh', '-c', `if [ -e "${repo}-wt" ] && [ ! -e "${repo}-wt.prev-${stamp}" ]; then mv "${repo}-wt" "${repo}-wt.prev-${stamp}"; fi; git -C "${repo}" worktree prune`], { timeoutMs: 30000 }) } catch { /* best effort */ }
   }
 }
 
